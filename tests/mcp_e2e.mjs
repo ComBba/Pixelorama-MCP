@@ -52,9 +52,9 @@ check("create_canvas via MCP", /12/.test(t) && !/❌/.test(t), t.slice(0, 120));
 t = await call("draw_pixel", { x: 2, y: 3, color: "#336699" });
 check("draw_pixel via MCP", !/❌|error/i.test(t), t.slice(0, 120));
 t = await call("export_image", { path: "/tmp/mcp_outside.png" });
-check("export outside roots refused at MCP layer", /outside the allowed roots/.test(t), t.slice(0, 160));
+check("export outside roots refused at MCP layer", /outside the allowed (write |read )?roots/.test(t), t.slice(0, 160));
 t = await call("import_image", { file_path: "/etc/hosts" });
-check("import_image outside roots refused (no file read)", /outside the allowed roots/.test(t), t.slice(0, 160));
+check("import_image outside roots refused (no file read)", /outside the allowed (write |read )?roots/.test(t), t.slice(0, 160));
 if (ALLOWED_DIR) {
   const out = path.join(ALLOWED_DIR, "mcp_e2e.png");
   try { fs.unlinkSync(out); } catch { /* none */ }
@@ -62,6 +62,12 @@ if (ALLOWED_DIR) {
   const sig = fs.existsSync(out) ? fs.readFileSync(out).subarray(0, 8).toString("hex") : "";
   check("export inside root via MCP writes PNG", sig === "89504e470d0a1a0a", t.slice(0, 160));
   try { fs.unlinkSync(out); } catch { /* none */ }
+}
+if (ALLOWED_DIR) {
+  t = await call("export_godot_spriteframes", { target_dir: ALLOWED_DIR, sprite_name: 'x"]\n[sub_resource type="GDScript" id="pwn"]', animation_name: "idle" });
+  check(".tres identifier injection refused", /must match/.test(t), t.slice(0, 160));
+  t = await call("export_aseprite_json", { target_dir: ALLOWED_DIR, base_name: "../../../../tmp/mcp_trav" });
+  check("name traversal refused at MCP layer", /plain name/.test(t), t.slice(0, 160));
 }
 if (IMPORT_PNG) {
   t = await call("import_image", { file_path: IMPORT_PNG, create_new_canvas: true, canvas_name: "imported_sheet" });

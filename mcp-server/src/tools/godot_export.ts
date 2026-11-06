@@ -11,7 +11,7 @@ import { z } from "zod";
 import * as fs from "fs";
 import * as path from "path";
 import { sendCommand } from "../bridge/pixelorama_client.js";
-import { assertAllowedPath } from "../utils/security.js";
+import { assertAllowedPath, assertResourceIdent } from "../utils/security.js";
 import { coerceInt, coerceFloat, coerceBool } from "../utils/schema_helpers.js";
 
 export function registerGodotExportTools(server: McpServer): void {
@@ -30,6 +30,8 @@ export function registerGodotExportTools(server: McpServer): void {
       // Ensure target directory exists
       try {
         assertAllowedPath(target_dir, "target_dir");
+        assertResourceIdent(String(sprite_name), "sprite_name");
+        assertResourceIdent(String(animation_name), "animation_name");
       } catch (err) {
         return { content: [{ type: "text" as const, text: `❌ ${err instanceof Error ? err.message : String(err)}` }] };
       }
@@ -111,6 +113,7 @@ ${frameEntries}],
       // Ensure target directory exists
       try {
         assertAllowedPath(target_dir, "target_dir");
+        assertResourceIdent(String(tileset_name), "tileset_name");
       } catch (err) {
         return { content: [{ type: "text" as const, text: `❌ ${err instanceof Error ? err.message : String(err)}` }] };
       }

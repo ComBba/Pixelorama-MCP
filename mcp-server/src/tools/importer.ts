@@ -180,7 +180,7 @@ export function registerImporterTools(server: McpServer): void {
       canvas_name,
     }) => {
       try {
-        assertAllowedPath(file_path, "file_path");
+        assertAllowedPath(file_path, "file_path", false);   // read-only use
       } catch (err) {
         return { content: [{ type: "text" as const, text: `❌ ${err instanceof Error ? err.message : String(err)}` }] };
       }

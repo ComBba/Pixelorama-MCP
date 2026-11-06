@@ -153,9 +153,13 @@ func execute(tool_name: String, params: Dictionary) -> Dictionary:
 	# Hardened fork: every command passes one path gate (fail-closed when security is missing).
 	if _security == null:
 		return {"success": false, "error": "Bridge security not initialised"}
-	var path_error: String = _security.check_params(params)
+	var path_error: String = _security.check_params(tool_name, params)
 	if not path_error.is_empty():
 		return {"success": false, "error": path_error}
+	# save_project without an explicit path would write to project.save_path, which may lie outside
+	# the allowed roots (a project opened from the GUI). Require an explicit, checked path.
+	if tool_name == "save_project" and str(params.get("path", "")).is_empty():
+		return {"success": false, "error": "save_project requires an explicit 'path' inside the allowed roots"}
 
 	print(LOG_TAG + "Executing: %s" % tool_name)
 	var callable: Callable = _tool_registry[tool_name]

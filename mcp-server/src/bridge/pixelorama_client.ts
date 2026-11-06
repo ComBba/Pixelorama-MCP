@@ -67,7 +67,7 @@ async function _executeHttpCommand(
 ): Promise<BridgeResponse> {
   const effectiveTimeout = timeoutMs ?? DEFAULT_TIMEOUT_MS;
   try {
-    assertParamsAllowed(params);
+    assertParamsAllowed(tool, params);
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) };
   }

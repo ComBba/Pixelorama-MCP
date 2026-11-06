@@ -83,7 +83,8 @@ func _handle_peer_connection(peer: StreamPeerTCP) -> void:
 	var content_length := 0
 	var header_end_index := -1
 	var start_time := Time.get_ticks_msec()
-	const TIMEOUT_MS := 120000
+	const HEADER_TIMEOUT_MS := 5000    # slow-loris: headers must arrive quickly (review 2026-11-06)
+	const TIMEOUT_MS := 30000          # whole request (body) deadline
 
 	while _is_running and peer.get_status() == StreamPeerTCP.STATUS_CONNECTED:
 		peer.poll()
@@ -115,6 +116,14 @@ func _handle_peer_connection(peer: StreamPeerTCP) -> void:
 				if content_length < 0 or content_length > MAX_REQUEST_SIZE:
 					_send_response(peer, 413, {"error": "Request body too large"})
 					return
+				# Refuse browser / bad-Host / unauthenticated requests BEFORE waiting for any body.
+				var first := header_str.split("\r\n")[0].split(" ")
+				var refused := _security_gate(first[0] if first.size() > 0 else "", first[1] if first.size() > 1 else "",
+					_parse_headers(header_str))
+				if refused.size() > 0:
+					push_warning(LOG_TAG + "Refused early: %s" % refused[1])
+					_send_response(peer, refused[0], {"success": false, "error": refused[1]})
+					return
 
 		if headers_parsed:
 			var body_received := buffer.size() - header_end_index
@@ -122,6 +131,10 @@ func _handle_peer_connection(peer: StreamPeerTCP) -> void:
 				_process_http_request(peer, buffer, header_end_index, content_length)
 				return
 
+		if not headers_parsed and Time.get_ticks_msec() - start_time > HEADER_TIMEOUT_MS:
+			push_warning(LOG_TAG + "Header timeout")
+			peer.disconnect_from_host()
+			return
 		if Time.get_ticks_msec() - start_time > TIMEOUT_MS:
 			push_warning(LOG_TAG + "Client request timed out")
 			peer.disconnect_from_host()

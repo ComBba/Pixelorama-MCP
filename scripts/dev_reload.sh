@@ -16,8 +16,10 @@ force="${1:-}"
 
 if pgrep -x Pixelorama >/dev/null; then
   if [ "$force" != "--force" ]; then
-    if [ -f "$TOKEN_FILE" ] && out=$(curl -s -m 3 -H "Host: 127.0.0.1:7373" -H "Content-Type: application/json" \
-        -H "X-Pix-Mcp-Token: $(cat "$TOKEN_FILE")" -d '{"tool":"list_canvases","params":{}}' http://127.0.0.1:7373/command); then
+    # token goes through curl's stdin config, never through argv (visible in `ps`)
+    if [ -f "$TOKEN_FILE" ] && out=$(printf 'header = "X-Pix-Mcp-Token: %s"\n' "$(cat "$TOKEN_FILE")" | curl -s -m 3 --config - \
+        -H "Host: 127.0.0.1:7373" -H "Content-Type: application/json" \
+        -d '{"tool":"list_canvases","params":{}}' http://127.0.0.1:7373/command); then
       if printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(c.get("has_unsaved_changes") for c in d["data"]["canvases"]) else 1)'; then
         echo "Refusing: a canvas has unsaved changes. Save it in Pixelorama or pass --force."; exit 2
       fi
