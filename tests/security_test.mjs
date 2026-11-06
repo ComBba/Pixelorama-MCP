@@ -95,6 +95,15 @@ if (ALLOWED_DIR) {
   r = await req({ headers: auth, body: { tool: "export_image", params: { path: path.join(link, "sym.png") } } });
   check("symlink below a root refused", r.status === 400 && fs.readdirSync(outside).length === 0, r.json?.error);
   fs.unlinkSync(link);
+  // dangling link: the target does not exist yet, so existence checks alone would let it through
+  const dangling = path.join(ALLOWED_DIR, "dangling_out.png");
+  try { fs.unlinkSync(dangling); } catch { /* none */ }
+  fs.symlinkSync(path.join(outside, "dangling.png"), dangling);
+  r = await req({ headers: auth, body: { tool: "export_image", params: { path: dangling } } });
+  check("dangling symlink below a root refused", r.status === 400 && fs.readdirSync(outside).length === 0, r.json?.error);
+  fs.unlinkSync(dangling);
+  r = await req({ headers: auth, body: { tool: "create_canvas", params: { width: 8, height: 8, name: "Hero/Idle" } } });
+  check("canvas name with '/' still allowed (not a file name)", r.json?.success === true, r.json?.error);
   r = await req({ headers: auth, body: { tool: "export_image", params: { path: ALLOWED_DIR + "/sub/../raw_dotdot.png" } } });
   check("raw '..' component refused", r.status === 400, r.json?.error);
   r = await req({ headers: auth, body: { tool: "export_image", params: { path: path.join(ALLOWED_DIR, ".hidden/x.png") } } });
@@ -120,7 +129,17 @@ if (READ_ONLY_FILE) {
     if (h.status === 200) healthy = Date.now() - t0;
   }
   slow.destroy();
-  check("stalled header released within ~6 s", healthy !== null && healthy < 7000, healthy);
+  check("stalled header released within ~3 s", healthy !== null && healthy < 3500, healthy);
+}
+{
+  // GET with a fake Content-Length must be answered immediately (no body wait)
+  const net = await import("node:net");
+  const t0 = Date.now();
+  const got = await new Promise((ok) => {
+    const c = net.connect(PORT, "127.0.0.1", () => c.write("GET /health HTTP/1.1\r\nHost: 127.0.0.1:7373\r\nContent-Length: 100\r\n\r\n"));
+    let b = ""; c.on("data", (d) => (b += d)); c.on("close", () => ok(b)); setTimeout(() => { c.destroy(); ok(b); }, 5000);
+  });
+  check("GET with fake Content-Length answered without waiting", /200 OK/.test(got) && Date.now() - t0 < 1500, Date.now() - t0);
 }
 r = await req({ headers: auth, body: "x", rawLength: 10 * 1024 * 1024 });
 check("oversize Content-Length -> 413", r.status === 413, r.status);

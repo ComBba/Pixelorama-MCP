@@ -13,8 +13,10 @@ import * as path from "path";
 
 export const TOKEN_HEADER = "X-Pix-Mcp-Token";
 export const PATH_KEYS = ["path", "target_dir", "file_path", "dir", "output_path", "output_dir", "export_path"];
-export const NAME_KEYS = ["prefix", "base_name", "name", "sprite_name", "animation_name", "tileset_name",
-  "canvas_name", "file_name", "filename"];
+export const NAME_KEYS = ["prefix", "base_name", "sprite_name", "animation_name", "tileset_name",
+  "file_name", "filename"];
+/** `name` only becomes a file name for these tools (layer/canvas names may contain "/"). */
+export const FILE_NAME_TOOLS: Record<string, string[]> = { create_palette: ["name"], delete_palette: ["name"], switch_palette: ["name"] };
 export const READ_TOOLS = ["open_project", "import_spritesheet", "import_image"];
 
 export function configDir(): string {
@@ -54,9 +56,12 @@ function loadRoots(key: string): string[] {
   try {
     const data = JSON.parse(fs.readFileSync(path.join(configDir(), "config.json"), "utf-8"));
     const roots = Array.isArray(data[key]) ? data[key] : [];
-    return roots.map((r: unknown) => String(r))
-      .filter((r: string) => path.isAbsolute(r) && r.length > 1 && !badComponent(r))
-      .map((r: string) => realpathLoose(r));
+    const ok = roots.map((r: unknown) => String(r)).filter((r: string) => {
+      const good = path.isAbsolute(r) && r.length > 1 && !badComponent(r);
+      if (!good) console.error(`[pix-mcp] ignoring ${key} entry (must be absolute, no dot components): ${r}`);
+      return good;
+    });
+    return ok.map((r: string) => realpathLoose(r));
   } catch {
     return [];
   }
@@ -76,7 +81,8 @@ export function assertAllowedPath(p: string, label = "path", forWrite = true): s
   const roots = allowedRoots(forWrite);
   // realpath of the target must stay inside the realpath of a root (defeats symlinks below the root)
   const resolved = realpathLoose(p);
-  const ok = roots.some((r) => resolved === r || resolved.startsWith(r + path.sep));
+  const root = roots.find((r) => resolved === r || resolved.startsWith(r + path.sep));
+  const ok = root !== undefined && !symlinkBelow(root, resolved);
   if (!ok) {
     throw new Error(
       `${label} '${p}' is outside the allowed ${forWrite ? "write" : "read"} roots (${roots.join(", ") || "none configured"}). ` +
@@ -84,6 +90,18 @@ export function assertAllowedPath(p: string, label = "path", forWrite = true): s
     );
   }
   return resolved;
+}
+
+/** lstat every component below the root: a dangling link is invisible to existsSync/realpath. */
+function symlinkBelow(root: string, target: string): boolean {
+  let cur = root;
+  for (const comp of path.relative(root, target).split(path.sep).filter(Boolean)) {
+    cur = path.join(cur, comp);
+    let st: fs.Stats;
+    try { st = fs.lstatSync(cur); } catch { return false; }   // rest does not exist yet
+    if (st.isSymbolicLink()) return true;
+  }
+  return false;
 }
 
 export function assertSafeName(v: unknown, label: string): void {
@@ -100,14 +118,17 @@ export function assertParamsAllowed(tool: string, params: Record<string, unknown
     const v = params[key];
     if (typeof v === "string" && v.length > 0) assertAllowedPath(v, key, forWrite);
   }
-  for (const key of NAME_KEYS) {
+  for (const key of [...NAME_KEYS, ...(FILE_NAME_TOOLS[tool] || [])]) {
     if (key in params && params[key] !== undefined && params[key] !== null) assertSafeName(params[key], key);
   }
 }
 
 /** Godot resource identifiers written into .tres files: strict allow-list (no quotes/newlines). */
 export function assertResourceIdent(v: string, label: string): void {
-  if (!/^[A-Za-z0-9_-]{1,64}$/.test(v)) throw new Error(`${label} must match [A-Za-z0-9_-]{1,64}`);
+  // letters/digits of any script (한글 OK), "_", "-", inner spaces; never quotes, brackets, "/", newlines
+  if (!/^[\p{L}\p{N}_-](?:[\p{L}\p{N}_ -]{0,62}[\p{L}\p{N}_-])?$/u.test(v)) {
+    throw new Error(`${label} must be 1-64 letters/digits/_/- (inner spaces allowed)`);
+  }
 }
 
 /** Only loopback bridge URLs are accepted; anything else would leak the token. */

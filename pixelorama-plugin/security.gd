@@ -11,8 +11,10 @@ extends RefCounted
 
 const TOKEN_HEADER := "x-pix-mcp-token"
 const PATH_KEYS := ["path", "target_dir", "file_path", "dir", "output_path", "output_dir"]
-const NAME_KEYS := ["prefix", "base_name", "name", "sprite_name", "animation_name", "tileset_name",
-	"canvas_name", "file_name", "filename"]
+const NAME_KEYS := ["prefix", "base_name", "sprite_name", "animation_name", "tileset_name",
+	"file_name", "filename"]
+## `name` only becomes a file name for these tools (layer/canvas names may legitimately contain "/").
+const FILE_NAME_TOOLS := {"create_palette": ["name"], "delete_palette": ["name"], "switch_palette": ["name"]}
 ## Tools whose path parameters are only READ (may use read_roots); everything else writes.
 const READ_TOOLS := ["open_project", "import_spritesheet", "import_image"]
 const MODE_DIR := 448     # 0700
@@ -66,6 +68,8 @@ func _load_roots(path: String, key: String) -> PackedStringArray:
 		var s := normalize(str(r))
 		if s.begins_with("/") and s.length() > 1 and not _has_bad_component(s):
 			roots.append(s)
+		else:
+			push_warning("[pix-MCP] ignoring %s entry (must be absolute, no dot components): %s" % [key, str(r)])
 	return roots
 
 
@@ -102,11 +106,15 @@ static func _has_symlink_below(root: String, p: String) -> bool:
 	for comp in rel.split("/", false):
 		var parent := cur
 		cur = cur.path_join(comp)
-		if not (FileAccess.file_exists(cur) or DirAccess.dir_exists_absolute(cur)):
-			return false   # rest of the path does not exist yet (will be created as real dirs/files)
 		var d := DirAccess.open(parent)
-		if d == null or d.is_link(comp):
+		if d == null:
+			return false   # parent does not exist yet: the rest will be created as real dirs/files
+		# Link check FIRST (lstat semantics): a dangling link reports as non-existent but the OS would
+		# still follow it on write (re-review 2026-11-06).
+		if d.is_link(comp):
 			return true
+		if not (FileAccess.file_exists(cur) or DirAccess.dir_exists_absolute(cur)):
+			return false
 	return false
 
 
@@ -142,7 +150,9 @@ func check_params(tool_name: String, params: Dictionary) -> String:
 					key, "write" if for_write else "read",
 					", ".join(allowed_roots if for_write else allowed_roots + read_roots) if (allowed_roots.size() + read_roots.size()) > 0 else "none configured",
 					config_dir]
-	for key in NAME_KEYS:
+	var name_keys: Array = NAME_KEYS.duplicate()
+	name_keys.append_array(FILE_NAME_TOOLS.get(tool_name, []))
+	for key in name_keys:
 		if params.has(key) and not is_safe_name(str(params[key])):
 			return "Parameter '%s' must be a plain name (no path separators or control characters)." % key
 	return ""

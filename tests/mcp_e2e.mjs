@@ -65,9 +65,23 @@ if (ALLOWED_DIR) {
 }
 if (ALLOWED_DIR) {
   t = await call("export_godot_spriteframes", { target_dir: ALLOWED_DIR, sprite_name: 'x"]\n[sub_resource type="GDScript" id="pwn"]', animation_name: "idle" });
-  check(".tres identifier injection refused", /must match/.test(t), t.slice(0, 160));
+  check(".tres identifier injection refused", /must (match|be)/.test(t), t.slice(0, 160));
   t = await call("export_aseprite_json", { target_dir: ALLOWED_DIR, base_name: "../../../../tmp/mcp_trav" });
   check("name traversal refused at MCP layer", /plain name/.test(t), t.slice(0, 160));
+  t = await call("create_palette", { name: "../../../tmp/mcp_pal" });
+  check("palette name traversal refused at MCP layer", /plain name/.test(t), t.slice(0, 160));
+  const os = await import("node:os");
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "pixmcp_"));
+  const dangling = path.join(ALLOWED_DIR, "mcp_dangling.png");
+  try { fs.unlinkSync(dangling); } catch { /* none */ }
+  fs.symlinkSync(path.join(outside, "nope.png"), dangling);
+  t = await call("export_image", { path: dangling });
+  check("dangling symlink refused at MCP layer", /outside the allowed/.test(t) && fs.readdirSync(outside).length === 0, t.slice(0, 160));
+  fs.unlinkSync(dangling); fs.rmSync(outside, { recursive: true, force: true });
+  const krDir = path.join(ALLOWED_DIR, "kr_tres");
+  t = await call("export_godot_spriteframes", { target_dir: krDir, sprite_name: "숭숭이", animation_name: "대기 동작" });
+  check("Korean .tres identifiers accepted", !/must be|❌/.test(t), t.slice(0, 160));
+  fs.rmSync(krDir, { recursive: true, force: true });
 }
 if (IMPORT_PNG) {
   t = await call("import_image", { file_path: IMPORT_PNG, create_new_canvas: true, canvas_name: "imported_sheet" });

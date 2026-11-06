@@ -83,7 +83,7 @@ func _handle_peer_connection(peer: StreamPeerTCP) -> void:
 	var content_length := 0
 	var header_end_index := -1
 	var start_time := Time.get_ticks_msec()
-	const HEADER_TIMEOUT_MS := 5000    # slow-loris: headers must arrive quickly (review 2026-11-06)
+	const HEADER_TIMEOUT_MS := 2000    # slow-loris: headers must arrive quickly (review 2026-11-06)
 	const TIMEOUT_MS := 30000          # whole request (body) deadline
 
 	while _is_running and peer.get_status() == StreamPeerTCP.STATUS_CONNECTED:
@@ -124,6 +124,10 @@ func _handle_peer_connection(peer: StreamPeerTCP) -> void:
 					push_warning(LOG_TAG + "Refused early: %s" % refused[1])
 					_send_response(peer, refused[0], {"success": false, "error": refused[1]})
 					return
+				# GET requests carry no body we use: never wait for one (a fake Content-Length on /health
+				# held the single accept loop for up to 30 s).
+				if (first[0] if first.size() > 0 else "") == "GET":
+					content_length = 0
 
 		if headers_parsed:
 			var body_received := buffer.size() - header_end_index
