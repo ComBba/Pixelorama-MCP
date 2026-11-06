@@ -6,7 +6,7 @@
 extends SceneTree
 
 const PREFIX := "res://src/Extensions/PixMcpBridge/"
-const PLUGIN_FILES := ["extension.json", "Main.tscn", "Main.gd", "command_handler.gd", "security.gd"]
+const PLUGIN_FILES := ["extension.json", "Main.tscn", "Main.gd", "command_handler.gd", "security.gd", "open_guard.gd", "guard_install.gd", "boot_guard.gd"]
 
 
 func _init() -> void:

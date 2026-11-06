@@ -2,7 +2,7 @@
 """open_project pre-scan tests against a RUNNING hardened bridge.
   python3 tests/pxo_test.py WRITE_DIR
 Saves a real project via the bridge, then crafts hostile variants (3D scene with an embedded script,
-object literal in image_size, legacy non-zip, wrong extension) and requires every one to be refused
+object literal in image_size, Resource() literal, effect shader_path, legacy non-zip, wrong extension) and requires every one to be refused
 while the genuine file opens. Payload scenes only print; nothing is executed by this script."""
 import http.client
 import json
@@ -81,6 +81,26 @@ bad_nested = rewrite(good, W / "pxo_nested.pxo", nested)
 st, js = call("open_project", {"path": str(bad_nested)})
 check("object literal anywhere in data.json refused", st == 400 and "object" in (js.get("error") or "").lower(), js.get("error"))
 
+def res_param(d):
+    d["layers"][0]["effects"] = [{"name": "x", "shader_path": "res://src/Shaders/Effects/BrightnessContrast.gdshaderinc",
+                                  "enabled": True, "params": {"brightness": 'Resource("/tmp/x.tres")'}}]
+    return d
+
+
+bad_res = rewrite(good, W / "pxo_resparam.pxo", res_param)
+st, js = call("open_project", {"path": str(bad_res)})
+check("Resource(...) literal (str_to_var loads files) refused", st == 400 and "resource" in (js.get("error") or "").lower(), js.get("error"))
+
+
+def shader_path(d):
+    d["layers"][0]["effects"] = [{"name": "x", "shader_path": "/tmp/x.tres", "enabled": True}]
+    return d
+
+
+bad_shader = rewrite(good, W / "pxo_shader.pxo", shader_path)
+st, js = call("open_project", {"path": str(bad_shader)})
+check("effect shader_path outside res:// / user:// .gdshader refused", st == 400 and "shader_path" in (js.get("error") or ""), js.get("error"))
+
 legacy = W / "pxo_legacy.pxo"
 legacy.write_bytes(b"not a zip, legacy v0 layout")
 st, js = call("open_project", {"path": str(legacy)})
@@ -91,7 +111,7 @@ tres.write_text('[gd_resource type="Resource" format=3]\n[resource]\n')
 st, js = call("open_project", {"path": str(tres)})
 check("non-.pxo extension refused", st == 400 and ".pxo" in (js.get("error") or ""), js.get("error"))
 
-for f in (good, scene, bad_obj, bad_nested, legacy, tres):
+for f in (good, scene, bad_obj, bad_nested, bad_res, bad_shader, legacy, tres):
     try:
         os.unlink(f)
     except FileNotFoundError:

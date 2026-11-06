@@ -4,6 +4,8 @@
 # Refuses to restart when any open canvas has unsaved changes (checked through the bridge) unless
 # --force. Pixelorama quarantines an extension that is listed in extensions/Monitoring.ini when a
 # session ends abnormally, so that file is removed before the app is stopped.
+# Also installs the boot open guard (pixelorama-plugin/{boot_guard,guard_install,open_guard,security}.gd
+# -> <data>/pix_mcp_guard/, autoload line in <data>/override.cfg) and requires /health open_guard=boot.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 DATA="$HOME/Library/Application Support/pixelorama"
@@ -36,11 +38,17 @@ mkdir -p "$DATA/extensions"
 rm -f "$DATA/extensions/Monitoring.ini" "$DATA/give_in_bug_report/$PCK"
 cp "$PCK" "$DATA/extensions/$PCK"
 grep -q '^PixMcpBridge=true' "$DATA/config.ini" 2>/dev/null || printf '\n[extensions]\n\nPixMcpBridge=true\n' >> "$DATA/config.ini"
+mkdir -p "$DATA/pix_mcp_guard"
+for f in boot_guard.gd guard_install.gd open_guard.gd security.gd; do cp "pixelorama-plugin/$f" "$DATA/pix_mcp_guard/$f"; done
+GUARD_LINE='PixMcpOpenGuard="*user://pix_mcp_guard/boot_guard.gd"'
+grep -qF "$GUARD_LINE" "$DATA/override.cfg" 2>/dev/null || printf '\n[autoload]\n\n%s\n' "$GUARD_LINE" >> "$DATA/override.cfg"
 echo "installed $(shasum -a 256 "$DATA/extensions/$PCK" | cut -c1-16)…"
 open -a "$APP"
 for i in $(seq 1 40); do
   if r=$(curl -s -m 2 -H "Host: 127.0.0.1:7373" http://127.0.0.1:7373/health) && [ -n "$r" ]; then
-    echo "bridge up after ${i}s: $r"; exit 0
+    echo "bridge up after ${i}s: $r"
+    case "$r" in *'"open_guard":"boot"'*) exit 0 ;; esac
+    echo "open guard is not active from boot (see Pixelorama's log)"; exit 3
   fi
   sleep 1
 done

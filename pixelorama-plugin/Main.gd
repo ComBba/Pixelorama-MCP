@@ -2,6 +2,7 @@
 ## Hardening (ComBba/Pixelorama-MCP, branch `hardened`): token auth, browser/DNS-rebinding refusal
 ## (Origin / Sec-Fetch-* / Host checks), JSON-only, no CORS, request size caps, eval_gdscript removed,
 ## file paths restricted to ~/.pixelorama-mcp/config.json allowed_roots (see security.gd).
+## Also keeps the GUI open guard (open_guard.gd) installed: boot autoload + runtime fallback.
 ## Uses a dedicated background Thread for instant TCP socket reception (even when minimized)
 ## and safely dispatches all Pixelorama commands to the Main Thread via call_deferred + Semaphore
 ## to prevent any OpenGL / SceneTree threading collisions or crashes.
@@ -18,8 +19,13 @@ var _is_running: bool = false
 var _api: Node = null
 var _command_handler: RefCounted = null
 var _security: RefCounted = null
+var _open_guard_mode: String = "off"
 
 const LOG_TAG: String = "[pix-MCP] "
+const GUARD_DIR := "user://pix_mcp_guard"
+const GUARD_FILES := ["boot_guard.gd", "guard_install.gd", "open_guard.gd", "security.gd"]
+const OVERRIDE_FILE := "user://override.cfg"
+const GUARD_AUTOLOAD_LINE := 'PixMcpOpenGuard="*user://pix_mcp_guard/boot_guard.gd"'
 
 class PendingRequest extends RefCounted:
 	var tool_name: String = ""
@@ -33,6 +39,9 @@ func _enter_tree() -> void:
 	# Prevent Godot from deep-sleeping when unfocused/minimized
 	OS.low_processor_usage_mode = false
 	OS.low_processor_usage_mode_sleep_usec = 1000
+
+	# The guard does not depend on the bridge: install it first, even if the server cannot start.
+	_ensure_open_guard()
 
 	_api = get_node_or_null("/root/ExtensionsApi")
 	if _api == null:
@@ -216,9 +225,10 @@ func _process_http_request(peer: StreamPeerTCP, buffer: PackedByteArray, header_
 		_send_response(peer, 200, {
 			"status": "ok",
 			"server": "pix-mcp-bridge-hardened",
-			"version": "0.2.1-hardened.1",
+			"version": "0.2.2-hardened.1",
 			"pixelorama_version": _api.general.get_pixelorama_version() if _api else "unknown",
-			"api_version": _api.get_api_version() if _api else -1
+			"api_version": _api.get_api_version() if _api else -1,
+			"open_guard": _open_guard_mode
 		})
 	elif method == "POST" and path == "/command":
 		var result := _dispatch_command_to_main_thread(body)
@@ -321,6 +331,64 @@ func _status_text(code: int) -> String:
 		500: return "Internal Server Error"
 		504: return "Gateway Timeout"
 	return "Unknown"
+
+
+## Guard files a person opens. Normally boot_guard.gd (autoload from user://override.cfg) installed it
+## before the main scene; otherwise install it now and re-check files opened at start-up. Always
+## refresh the boot copy and the override line: Pixelorama rewrites override.cfg from scratch when
+## some preferences change, which would silently drop the autoload.
+func _ensure_open_guard() -> void:
+	_open_guard_mode = preload("guard_install.gd").install(get_tree(), "runtime", preload("open_guard.gd"))
+	_sync_boot_guard()
+	if _open_guard_mode != "boot":
+		_warn_files_opened_before_guard()
+
+
+func _sync_boot_guard() -> void:
+	DirAccess.make_dir_recursive_absolute(GUARD_DIR)
+	for f in GUARD_FILES:
+		var src := FileAccess.get_file_as_string("res://src/Extensions/PixMcpBridge/".path_join(f))
+		var dst := GUARD_DIR.path_join(f)
+		if src.is_empty():
+			push_error(LOG_TAG + "guard source missing in PCK: " + f)
+			return
+		if FileAccess.file_exists(dst) and FileAccess.get_file_as_string(dst) == src:
+			continue
+		var out := FileAccess.open(dst, FileAccess.WRITE)
+		if out == null:
+			push_error(LOG_TAG + "cannot write " + dst)
+			return
+		out.store_string(src)
+		out.close()
+	var cfg := FileAccess.get_file_as_string(OVERRIDE_FILE) if FileAccess.file_exists(OVERRIDE_FILE) else ""
+	if cfg.find(GUARD_AUTOLOAD_LINE) == -1:
+		var out := FileAccess.open(OVERRIDE_FILE, FileAccess.WRITE)
+		if out == null:
+			push_error(LOG_TAG + "cannot write " + OVERRIDE_FILE + "; boot guard not registered")
+			return
+		out.store_string(cfg + ("" if cfg.is_empty() or cfg.ends_with("\n") else "\n") + "\n[autoload]\n\n" + GUARD_AUTOLOAD_LINE + "\n")
+		out.close()
+		print(LOG_TAG + "boot open guard registered in " + OVERRIDE_FILE + " (active from the next start)")
+
+
+## Files given on the command line were opened by Main._ready() before this node existed. Without the
+## boot guard they were not checked: re-check them now and warn loudly if any would have been refused.
+func _warn_files_opened_before_guard() -> void:
+	var security := preload("security.gd")
+	var args := OS.get_cmdline_args()
+	args.append_array(OS.get_cmdline_user_args())
+	for arg in args:
+		var p := str(arg).replace("\\", "/")
+		if not p.begins_with("/") or not FileAccess.file_exists(p):
+			continue
+		var why: String = security.check_pxo(p) if p.get_extension().to_lower() == "pxo" else security.check_open_file(p)
+		if why.is_empty():
+			continue
+		push_error(LOG_TAG + "file opened at start-up BEFORE the guard loaded would be refused: %s (%s)" % [p, why])
+		Global.popup_error(
+			("WARNING: '%s' was opened at start-up, before the pix-MCP open guard was active, and would "
+			+ "have been refused:\n%s\n\nClose it without saving, quit Pixelorama and do not open it again.") % [p.get_file(), why]
+		)
 
 
 func _exit_tree() -> void:

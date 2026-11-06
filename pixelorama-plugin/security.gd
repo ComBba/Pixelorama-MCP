@@ -158,10 +158,22 @@ func check_params(tool_name: String, params: Dictionary) -> String:
 	return ""
 
 
-## open_project hands the file to Pixelorama's own loader, which (v1.2.4) can `load()` a PackedScene
-## embedded for 3D layers (its script guard is a substring test) and runs `str_to_var` on cel
-## `image_size`; the legacy non-zip format has its own loader. Refuse anything outside the safe subset.
-func check_pxo(path: String) -> String:
+## Pixelorama's loaders run `str_to_var` on strings taken from opened files (cel image_size, layer
+## effect params, tileset colours, .ora/.kra XML attributes). In Godot 4 `str_to_var` builds objects
+## from `Object(...)` and LOADS FILES from `Resource("path")` (a .tres with an inline GDScript runs its
+## `_init`: measured 2026-11-06). Any string containing either constructor NAME is refused, with or
+## without "(" (the parser skips whitespace and comments before it); "Resource" also matches
+## SubResource / ExtResource and typed arrays such as Array[Resource].
+static func _loader_literal_re() -> RegEx:
+	return RegEx.create_from_string("(Object|Resource)(?![A-Za-z0-9_])")
+
+
+## open_project and the GUI open guard hand the file to Pixelorama's own loader, which (v1.2.4) can
+## `load()` a PackedScene embedded for 3D layers (its script guard is a substring test that an inline
+## `[sub_resource type="GDScript"]` passes: reproduced 2026-11-06), `load()`s each layer effect's
+## `shader_path`, and runs `str_to_var` on several fields; the legacy non-zip format has its own
+## loader. Refuse anything outside the safe subset.
+static func check_pxo(path: String) -> String:
 	if path.get_extension().to_lower() != "pxo":
 		return "open_project only opens .pxo files"
 	var zr := ZIPReader.new()
@@ -185,23 +197,80 @@ func check_pxo(path: String) -> String:
 	for ts in data.get("tilesets", []):
 		if ts is Dictionary and ts.has("tile_size") and vec.search(str(ts["tile_size"])) == null:
 			return "Refusing .pxo: tileset tile_size is not a plain (w, h) pair"
-	if _contains_object_literal(data):
-		return "Refusing .pxo: serialized object literal found in data.json"
+	var bad_shader := _bad_shader_path(data)
+	if not bad_shader.is_empty():
+		return "Refusing .pxo: layer effect shader_path '%s' is not a built-in or user shader (.gdshader)" % bad_shader
+	if _contains_loader_literal(data, _loader_literal_re()):
+		return "Refusing .pxo: serialized Object / Resource constructor found in data.json"
 	return ""
 
 
-static func _contains_object_literal(v: Variant) -> bool:
-	if v is String:
-		return (v as String).find("Object(") != -1
+## Effects store `shader_path` and LayerEffect.deserialize `load()`s it: a path to a .tres/.tscn would
+## run embedded scripts. Only Pixelorama's own shaders (res://) or the user shader folder, .gdshader(inc).
+static func _bad_shader_path(v: Variant) -> String:
 	if v is Dictionary:
 		for k in v:
-			if _contains_object_literal(k) or _contains_object_literal(v[k]):
+			if str(k) == "shader_path":
+				var sp := str(v[k])
+				var ext := sp.get_extension().to_lower()
+				if not (sp.begins_with("res://") or sp.begins_with("user://")) or sp.find("..") != -1 \
+						or not (ext == "gdshader" or ext == "gdshaderinc"):
+					return sp
+			var inner := _bad_shader_path(v[k])
+			if not inner.is_empty():
+				return inner
+	elif v is Array:
+		for x in v:
+			var inner := _bad_shader_path(x)
+			if not inner.is_empty():
+				return inner
+	return ""
+
+
+static func _contains_loader_literal(v: Variant, re: RegEx) -> bool:
+	if v is String or v is StringName:
+		return re.search(str(v)) != null
+	if v is Dictionary:
+		for k in v:
+			if _contains_loader_literal(k, re) or _contains_loader_literal(v[k], re):
 				return true
 	if v is Array:
 		for x in v:
-			if _contains_object_literal(x):
+			if _contains_loader_literal(x, re):
 				return true
 	return false
+
+
+## Files a PERSON opens (File > Open, recent list, drag & drop, Finder while running). Called by the
+## open guard (open_guard.gd) for every non-.pxo file; .pxo goes through check_pxo. "" = allowed.
+static func check_open_file(path: String) -> String:
+	var ext := path.get_extension().to_lower()
+	match ext:
+		"tres":
+			# Pixelorama `load()`s it to look for a VisualShader; any inline GDScript runs on load.
+			return "Godot .tres resources are not opened (loading one runs any script it embeds)"
+		"pck", "zip":
+			return "extensions are not installed by opening files; install reviewed PCKs with scripts/dev_reload.sh"
+		"ora", "kra":
+			# Both parsers feed XML attribute values to str_to_var.
+			var zr := ZIPReader.new()
+			if zr.open(path) != OK:
+				return "not a valid %s archive" % ext
+			var re := _loader_literal_re()
+			for f in zr.get_files():
+				if not str(f).to_lower().ends_with(".xml"):
+					continue
+				var xml := zr.read_file(f).get_string_from_utf8()
+				# XMLParser decodes entities in attribute values: scan the decoded text, and refuse
+				# numeric character references outright (nothing in a genuine ORA/KRA needs them).
+				if xml.find("&#") != -1 or re.search(xml.xml_unescape()) != null or re.search(xml) != null:
+					zr.close()
+					return "%s contains an Object / Resource constructor or a numeric character reference in %s" % [ext, f]
+			zr.close()
+		"json":
+			if FileAccess.file_exists(path) and _loader_literal_re().search(FileAccess.get_file_as_string(path)) != null:
+				return "palette .json contains an Object / Resource constructor"
+	return ""
 
 
 static func constant_time_equals(a: String, b: String) -> bool:
