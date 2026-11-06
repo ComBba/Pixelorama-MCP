@@ -342,6 +342,19 @@ func _ensure_open_guard() -> void:
 	_sync_boot_guard()
 	if _open_guard_mode != "boot":
 		_warn_files_opened_before_guard()
+	var bad_shaders: PackedStringArray = preload("security.gd").unsafe_user_shaders()
+	if not bad_shaders.is_empty():
+		push_error(LOG_TAG + "user://shaders has shaders with #include: " + ", ".join(bad_shaders))
+		Global.popup_error.call_deferred(("WARNING: these shaders in Pixelorama's shader folder use #include, which can load "
+			+ "code-carrying files at every start: %s\nRemove them from %s.") % [", ".join(bad_shaders),
+			ProjectSettings.globalize_path("user://shaders")])
+	# Pixelorama rewrites override.cfg whenever some preferences change: put the line back quickly
+	# (and on exit) so the next Finder-started session is guarded from boot.
+	var timer := Timer.new()
+	timer.wait_time = 3.0
+	timer.timeout.connect(_ensure_override_line)
+	add_child(timer)
+	timer.start()
 
 
 func _sync_boot_guard() -> void:
@@ -360,6 +373,10 @@ func _sync_boot_guard() -> void:
 			return
 		out.store_string(src)
 		out.close()
+	_ensure_override_line()
+
+
+func _ensure_override_line() -> void:
 	var cfg := FileAccess.get_file_as_string(OVERRIDE_FILE) if FileAccess.file_exists(OVERRIDE_FILE) else ""
 	if cfg.find(GUARD_AUTOLOAD_LINE) == -1:
 		var out := FileAccess.open(OVERRIDE_FILE, FileAccess.WRITE)
@@ -392,6 +409,7 @@ func _warn_files_opened_before_guard() -> void:
 
 
 func _exit_tree() -> void:
+	_ensure_override_line()
 	_is_running = false
 
 	if _server.is_listening():

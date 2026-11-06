@@ -10,7 +10,8 @@ quarantined).
 WRITE_DIR must be an allowed write root of the bridge. Requires: no unsaved work in Pixelorama (the
 running instance is stopped). Payloads are BENIGN: each inline GDScript only writes "<case>.marker"
 into WRITE_DIR. Pixelorama 1.2.4 without the guard runs pxo_scene and pxo_effect_param
-(reproduced 2026-11-06)."""
+(reproduced 2026-11-06);
+the reviewer reproduced gltf_image and shader_include in Godot 4.7.2."""
 import http.client
 import json
 import subprocess
@@ -182,6 +183,20 @@ with zipfile.ZipFile(ora_ent, "w") as z:
     z.writestr("stack.xml", f'<?xml version="1.0"?><image w=\'Resource&#40;"{res_ora_ent}"&#41;\' h="8"><stack></stack></image>')
 cases["ora_entity"] = ora_ent
 
+# 2026-11-06 review: formats a deny-list missed (reproduced by the reviewer in Godot 4.7.2 headless)
+res_gltf = evil_tres("gltf_image")
+gltf = W / "gltf_image.gltf"
+gltf.write_text(json.dumps({"asset": {"version": "2.0"}, "images": [{"uri": res_gltf.name}],
+                            "scenes": [{"nodes": []}], "scene": 0}))
+cases["gltf_image"] = gltf
+res_inc = evil_tres("shader_include")
+shader = W / "shader_include.gdshader"
+shader.write_text(f'shader_type canvas_item;\n#include "{res_inc.name}"\n')
+cases["shader_include"] = shader
+gpl = W / "gpl_escape.gpl"
+gpl.write_text("GIMP Palette\n#Palette Name: ../gpl_escape\n#Colors: 1\n255 0 0\tff0000\n")
+GPL_TARGET = DATA / "gpl_escape.json"   # user://Palettes/../gpl_escape.json
+
 # ---------- run ----------
 for m in W.glob("*.marker"):
     m.unlink()
@@ -206,10 +221,17 @@ if not PROBE:
     results.append(("the extension restored the override line", GUARD_LINE in cfg.read_text(), cfg.read_text()))
     h, names = open_like_a_person(base)
     results.append(("next start is guarded from boot again", bool(h) and h.get("open_guard") == "boot", h))
+    # ...and while a session runs (Pixelorama rewrites the file when a preference changes)
+    cfg.write_text(cfg.read_text().replace(GUARD_LINE, ""))
+    time.sleep(5)
+    results.append(("override line restored within seconds while running", GUARD_LINE in cfg.read_text(), cfg.read_text()))
+    h, names = open_like_a_person(gpl)
+    results.append(("palette name with ../ refused (no file outside the palette folder)", not GPL_TARGET.exists(), GPL_TARGET))
+    GPL_TARGET.unlink(missing_ok=True)
 
 stop_all()
 subprocess.run(["open", "-a", APP])   # leave a plain instance running
-for f in list(cases.values()) + [base] + list(W.glob("*_payload.tres")) + list(W.glob("*.marker")):
+for f in list(cases.values()) + [base, gpl] + list(W.glob("*_payload.tres")) + list(W.glob("*.marker")):
     f.unlink(missing_ok=True)
 
 if PROBE:

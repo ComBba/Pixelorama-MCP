@@ -241,16 +241,23 @@ static func _contains_loader_literal(v: Variant, re: RegEx) -> bool:
 	return false
 
 
-## Files a PERSON opens (File > Open, recent list, drag & drop, Finder while running). Called by the
-## open guard (open_guard.gd) for every non-.pxo file; .pxo goes through check_pxo. "" = allowed.
+## Formats a PERSON may open in the GUI (allow-list; .pxo goes through check_pxo). Everything else is
+## refused: 2026-11-06 review reproduced code execution through formats a deny-list had missed
+## (.gltf/.glb image URIs that load a .tres, a .gdshader `#include` of a .tres) on top of .tres
+## itself. Raster images go to Image.load_from_file / the APNG importer; palettes, ORA/KRA,
+## Aseprite, PSD and Piskel to Pixelorama's own parsers, whose str_to_var sinks are scanned below.
+const GUI_OPEN_FORMATS := ["png", "jpg", "jpeg", "webp", "bmp", "tga", "gif", "gpl", "pal", "json",
+	"ora", "kra", "ase", "aseprite", "psd", "piskel"]
+
+
+## Files a PERSON opens (File > Open, recent list, drag & drop, Finder). Called by the open guard
+## (open_guard.gd) for every non-.pxo file. "" = allowed.
 static func check_open_file(path: String) -> String:
 	var ext := path.get_extension().to_lower()
+	if not GUI_OPEN_FORMATS.has(ext):
+		return ".%s files are not opened while the pix-MCP open guard is active (allowed: .pxo, %s)" % [
+			ext, ", ".join(GUI_OPEN_FORMATS.map(func(e): return "." + e))]
 	match ext:
-		"tres":
-			# Pixelorama `load()`s it to look for a VisualShader; any inline GDScript runs on load.
-			return "Godot .tres resources are not opened (loading one runs any script it embeds)"
-		"pck", "zip":
-			return "extensions are not installed by opening files; install reviewed PCKs with scripts/dev_reload.sh"
 		"ora", "kra":
 			# Both parsers feed XML attribute values to str_to_var.
 			var zr := ZIPReader.new()
@@ -270,7 +277,30 @@ static func check_open_file(path: String) -> String:
 		"json":
 			if FileAccess.file_exists(path) and _loader_literal_re().search(FileAccess.get_file_as_string(path)) != null:
 				return "palette .json contains an Object / Resource constructor"
+		"gpl":
+			# Palettes.save_palette writes palettes_dir/<name>.json: the name lines are a path.
+			for line in FileAccess.get_file_as_string(path).split("\n"):
+				var l := line.strip_edges()
+				for key in ["#Palette Name: ", "Name: "]:
+					if l.begins_with(key):
+						var name := l.trim_prefix(key).strip_edges()
+						if not is_safe_name(name) or name.begins_with("."):
+							return "palette name '%s' is not a plain name" % name
 	return ""
+
+
+## Shaders copied into user://shaders are load()ed at every start outside OpenSave (top menu, layer
+## effects). An `#include` there can pull in a code-carrying resource: report any such file.
+static func unsafe_user_shaders() -> PackedStringArray:
+	var bad := PackedStringArray()
+	var dir := "user://shaders"
+	if not DirAccess.dir_exists_absolute(dir):
+		return bad
+	for f in DirAccess.get_files_at(dir):
+		var text := FileAccess.get_file_as_string(dir.path_join(f)).replace("\\\n", "")
+		if text.find("include") != -1:
+			bad.append(f)
+	return bad
 
 
 static func constant_time_equals(a: String, b: String) -> bool:
