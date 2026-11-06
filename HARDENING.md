@@ -26,7 +26,7 @@ cd mcp-server && npm ci --ignore-scripts && npm run build && cd ..
 godot --headless --script pack.gd          # -> PixMcpBridge.pck (reproducible: same sources -> same SHA-256)
 scripts/dev_reload.sh                      # install into Pixelorama, restart safely, wait for the bridge
 ```
-Create `~/.pixelorama-mcp/config.json` (mode 0600) with `{"allowed_roots": ["/abs/project/dir"]}`.
+Create `~/.pixelorama-mcp/config.json` (mode 0600): `{"allowed_roots": ["/abs/write/dir"], "read_roots": ["/abs/project"]}`.
 
 ## Tests (need a running Pixelorama with the extension)
 ```bash
