@@ -11,6 +11,7 @@ import { z } from "zod";
 import * as fs from "fs";
 import * as path from "path";
 import { sendCommand } from "../bridge/pixelorama_client.js";
+import { assertAllowedPath } from "../utils/security.js";
 import { coerceInt, coerceFloat, coerceBool } from "../utils/schema_helpers.js";
 
 export function registerGodotExportTools(server: McpServer): void {
@@ -27,6 +28,11 @@ export function registerGodotExportTools(server: McpServer): void {
     },
     async ({ target_dir, sprite_name, animation_name, fps, loop }) => {
       // Ensure target directory exists
+      try {
+        assertAllowedPath(target_dir, "target_dir");
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: `❌ ${err instanceof Error ? err.message : String(err)}` }] };
+      }
       if (!fs.existsSync(target_dir)) {
         fs.mkdirSync(target_dir, { recursive: true });
       }
@@ -103,6 +109,11 @@ ${frameEntries}],
     },
     async ({ target_dir, tileset_name, tile_size }) => {
       // Ensure target directory exists
+      try {
+        assertAllowedPath(target_dir, "target_dir");
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: `❌ ${err instanceof Error ? err.message : String(err)}` }] };
+      }
       if (!fs.existsSync(target_dir)) {
         fs.mkdirSync(target_dir, { recursive: true });
       }

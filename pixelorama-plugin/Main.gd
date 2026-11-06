@@ -1,4 +1,7 @@
-## pix-MCP Bridge — Main Extension Entry Point
+## pix-MCP Bridge — Main Extension Entry Point (HARDENED FORK)
+## Hardening (ComBba/Pixelorama-MCP, branch `hardened`): token auth, browser/DNS-rebinding refusal
+## (Origin / Sec-Fetch-* / Host checks), JSON-only, no CORS, request size caps, eval_gdscript removed,
+## file paths restricted to ~/.pixelorama-mcp/config.json allowed_roots (see security.gd).
 ## Uses a dedicated background Thread for instant TCP socket reception (even when minimized)
 ## and safely dispatches all Pixelorama commands to the Main Thread via call_deferred + Semaphore
 ## to prevent any OpenGL / SceneTree threading collisions or crashes.
@@ -6,12 +9,15 @@ extends Node
 
 const PORT: int = 7373
 const MAX_REQUEST_SIZE: int = 4194304  # 4 MB max request body
+const MAX_HEADER_SIZE: int = 16384
+const ALLOWED_HOSTS := ["127.0.0.1:7373", "localhost:7373"]
 
 var _server: TCPServer = TCPServer.new()
 var _thread: Thread = Thread.new()
 var _is_running: bool = false
 var _api: Node = null
 var _command_handler: RefCounted = null
+var _security: RefCounted = null
 
 const LOG_TAG: String = "[pix-MCP] "
 
@@ -33,8 +39,15 @@ func _enter_tree() -> void:
 		push_error(LOG_TAG + "ExtensionsApi not found! Is this running inside Pixelorama?")
 		return
 
+	_security = preload("security.gd").new()
+	_security.load_config()
+	if _security.token.is_empty():
+		push_error(LOG_TAG + "No auth token available; refusing to start the bridge.")
+		return
 	_command_handler = preload("command_handler.gd").new()
 	_command_handler.initialize(_api)
+	_command_handler.set_security(_security)
+	print(LOG_TAG + "Auth token file: %s/token · allowed roots: %s" % [_security.config_dir, ", ".join(_security.allowed_roots)])
 
 	var err := _server.listen(PORT, "127.0.0.1")
 	if err != OK:
@@ -79,9 +92,15 @@ func _handle_peer_connection(peer: StreamPeerTCP) -> void:
 			var data := peer.get_data(mini(available, MAX_REQUEST_SIZE))
 			if data[0] == OK:
 				buffer.append_array(data[1])
+		if buffer.size() > MAX_HEADER_SIZE + MAX_REQUEST_SIZE:
+			_send_response(peer, 413, {"error": "Request too large"})
+			return
 
 		if not headers_parsed:
 			var header_end := _find_header_end(buffer)
+			if header_end == -1 and buffer.size() > MAX_HEADER_SIZE:
+				_send_response(peer, 431, {"error": "Headers too large"})
+				return
 			if header_end != -1:
 				headers_parsed = true
 				header_end_index = header_end + 4
@@ -93,6 +112,9 @@ func _handle_peer_connection(peer: StreamPeerTCP) -> void:
 					if line.to_lower().begins_with("content-length:"):
 						content_length = int(line.split(":")[1].strip_edges())
 						break
+				if content_length < 0 or content_length > MAX_REQUEST_SIZE:
+					_send_response(peer, 413, {"error": "Request body too large"})
+					return
 
 		if headers_parsed:
 			var body_received := buffer.size() - header_end_index
@@ -121,6 +143,37 @@ func _find_header_end(buf: PackedByteArray) -> int:
 	return -1
 
 
+func _parse_headers(header_str: String) -> Dictionary:
+	var headers := {}
+	var lines := header_str.split("\r\n")
+	for i in range(1, lines.size()):
+		var idx := lines[i].find(":")
+		if idx > 0:
+			headers[lines[i].substr(0, idx).strip_edges().to_lower()] = lines[i].substr(idx + 1).strip_edges()
+	return headers
+
+
+## Returns [status, error] for a request that must be refused, or [] when it may proceed.
+func _security_gate(method: String, path: String, headers: Dictionary) -> Array:
+	# Browsers always attach Origin and/or Sec-Fetch-* to cross-site and fetch() requests: a real MCP
+	# client (Node) never does. Refusing them blocks drive-by web pages (CSRF / simple-request POSTs).
+	if headers.has("origin") or headers.has("referer"):
+		return [403, "Browser-originated requests are refused"]
+	for k in headers.keys():
+		if str(k).begins_with("sec-fetch-"):
+			return [403, "Browser-originated requests are refused"]
+	# DNS-rebinding defence: the Host must be the loopback name we bind to.
+	if not ALLOWED_HOSTS.has(str(headers.get("host", "")).to_lower()):
+		return [403, "Invalid Host header"]
+	if method == "GET" and path == "/health":
+		return []
+	if not _security.constant_time_equals(str(headers.get(_security.TOKEN_HEADER, "")), _security.token):
+		return [401, "Missing or invalid %s header" % _security.TOKEN_HEADER]
+	if method == "POST" and not str(headers.get("content-type", "")).to_lower().begins_with("application/json"):
+		return [415, "Content-Type must be application/json"]
+	return []
+
+
 func _process_http_request(peer: StreamPeerTCP, buffer: PackedByteArray, header_end: int, content_length: int) -> void:
 	var header_bytes := buffer.slice(0, header_end)
 	var header_str := header_bytes.get_string_from_utf8()
@@ -128,6 +181,13 @@ func _process_http_request(peer: StreamPeerTCP, buffer: PackedByteArray, header_
 	var parts := first_line.split(" ")
 	var method: String = parts[0] if parts.size() > 0 else ""
 	var path: String = parts[1] if parts.size() > 1 else ""
+	var headers := _parse_headers(header_str)
+
+	var refused := _security_gate(method, path, headers)
+	if refused.size() > 0:
+		push_warning(LOG_TAG + "Refused %s %s: %s" % [method, path, refused[1]])
+		_send_response(peer, refused[0], {"success": false, "error": refused[1]})
+		return
 
 	var body := ""
 	if header_end < buffer.size():
@@ -135,55 +195,37 @@ func _process_http_request(peer: StreamPeerTCP, buffer: PackedByteArray, header_
 		var body_bytes := buffer.slice(header_end, header_end + body_len)
 		body = body_bytes.get_string_from_utf8()
 
-	var response_body: String
-	var status_code: int
-
 	if method == "GET" and path == "/health":
-		var health := {
+		_send_response(peer, 200, {
 			"status": "ok",
-			"server": "pix-mcp-bridge",
-			"version": "0.2.0",
+			"server": "pix-mcp-bridge-hardened",
+			"version": "0.2.1-hardened.1",
 			"pixelorama_version": _api.general.get_pixelorama_version() if _api else "unknown",
 			"api_version": _api.get_api_version() if _api else -1
-		}
-		response_body = JSON.stringify(health)
-		status_code = 200
-
+		})
 	elif method == "POST" and path == "/command":
 		var result := _dispatch_command_to_main_thread(body)
-		response_body = JSON.stringify(result)
-		if result.get("success", false):
-			status_code = 200
-		elif str(result.get("error", "")).find("timed out") != -1:
-			status_code = 504
-		else:
-			status_code = 400
-
+		var status_code := 200
+		if not result.get("success", false):
+			status_code = 504 if str(result.get("error", "")).find("timed out") != -1 else 400
+		_send_response(peer, status_code, result)
 	elif method == "GET" and path == "/tools":
-		var tools: Array = _command_handler.get_available_tools() if _command_handler else []
-		response_body = JSON.stringify({"tools": tools})
-		status_code = 200
-
-	elif method == "OPTIONS":
-		response_body = ""
-		status_code = 204
+		_send_response(peer, 200, {"tools": _command_handler.get_available_tools() if _command_handler else []})
 	else:
-		response_body = JSON.stringify({"error": "Not found", "path": path, "method": method})
-		status_code = 404
+		_send_response(peer, 404 if method in ["GET", "POST"] else 405, {"error": "Not found", "path": path, "method": method})
 
-	var body_bytes: PackedByteArray = response_body.to_utf8_buffer()
+
+func _send_response(peer: StreamPeerTCP, status_code: int, payload: Dictionary) -> void:
+	# No Access-Control-* headers: cross-origin browser reads stay blocked by the same-origin policy.
+	var body_bytes: PackedByteArray = JSON.stringify(payload).to_utf8_buffer()
 	var response_header := "HTTP/1.1 %d %s\r\n" % [status_code, _status_text(status_code)]
 	response_header += "Content-Type: application/json; charset=utf-8\r\n"
 	response_header += "Content-Length: %d\r\n" % body_bytes.size()
-	response_header += "Access-Control-Allow-Origin: *\r\n"
-	response_header += "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
-	response_header += "Access-Control-Allow-Headers: Content-Type\r\n"
+	response_header += "X-Content-Type-Options: nosniff\r\n"
 	response_header += "Connection: close\r\n"
 	response_header += "\r\n"
-
 	var full_response := response_header.to_utf8_buffer()
 	full_response.append_array(body_bytes)
-
 	peer.put_data(full_response)
 	peer.disconnect_from_host()
 
@@ -252,7 +294,13 @@ func _status_text(code: int) -> String:
 		200: return "OK"
 		204: return "No Content"
 		400: return "Bad Request"
+		401: return "Unauthorized"
+		403: return "Forbidden"
 		404: return "Not Found"
+		405: return "Method Not Allowed"
+		413: return "Payload Too Large"
+		415: return "Unsupported Media Type"
+		431: return "Request Header Fields Too Large"
 		500: return "Internal Server Error"
 		504: return "Gateway Timeout"
 	return "Unknown"

@@ -486,7 +486,7 @@ export function registerAiHelperTools(server: McpServer): void {
       plan += `2. **Layer: \`Celestials\`** (Opacity: 100%, Normal or Add)\n`;
       plan += `   - Stars, moon, nebulae, aurora striations (\`draw_line\` / \`draw_pixels_fast\`)\n`;
       plan += `3. **Layer: \`Backdrop_Far\`** (Opacity: 100%, Normal)\n`;
-      plan += `   - Distant mountain ridges, far city silhouettes (filled polygon or \`eval_gdscript\` noise)\n`;
+      plan += `   - Distant mountain ridges, far city silhouettes (filled polygons or draw_path layers)\n`;
       plan += `4. **Layer: \`Midground_Terrain\`** (Opacity: 100%, Normal)\n`;
       plan += `   - Hills, tree lines, lake/water body filling Y=${horizonY}..${height}\n`;
       plan += `5. **Layer: \`Reflections\`** (Opacity: 60-80%, Screen or Normal)\n`;
@@ -499,7 +499,7 @@ export function registerAiHelperTools(server: McpServer): void {
       plan += `   - Subtle edge shading to pull focus into center composition\n\n`;
 
       plan += `## ⚡ Procedural Acceleration Tips\n`;
-      plan += `- Use \`eval_gdscript\` for noise textures, water ripples, and mountain fractals (runs in milliseconds inside Pixelorama).\n`;
+      plan += `- Build noise, ripples and fractal ridges from draw_pixels / draw_path batches (arbitrary scripts are disabled in this hardened fork).\n`;
       plan += `- Use \`draw_pixels_fast\` with flat arrays \`[x, y, color, ...]\` for thousands of star/detail dots.\n`;
       plan += `- Use \`capture_canvas_image\` with \`max_size: 512\` to inspect composition during generation.\n`;
 

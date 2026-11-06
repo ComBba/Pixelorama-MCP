@@ -424,41 +424,6 @@ export function registerProceduralTools(server: McpServer): void {
     }
   );
 
-  // ── eval_gdscript ──────────────────────────────────────────────────────────
-  server.tool(
-    "eval_gdscript",
-    "Execute custom GDScript code natively inside Pixelorama. The script runs with direct access to 'api' (ApiContext with get_pixel, get_layer_image, get_composite_image, get_layers, get_canvas_size, create_image, set_pixel_safe, has_layer, is_valid_image), 'image' (target Cel Image), 'project', and 'params'. HIGH PERFORMANCE BULK WRITES: To avoid slow per-pixel loops, 'run()' can return a PackedByteArray (raw RGBA8/RGB8 bytes) or Image (Image.create(w, h, false, Image.FORMAT_RGBA8) or api.create_image(w, h)) for instant blit commit in < 0.1ms; canvas automatically adapts if dimensions differ. Custom values: 'run()' can also return arbitrary JSON-serializable values (String, Array, Dictionary, int, float, bool) which are returned in 'Value:'. Out-of-bounds 'set_pixel', 'get_pixel', and null 'get_width()'/'get_height()' calls are transparently bounds-checked to guarantee zero crash. 'api.get_layer_image(name)' safely returns an empty transparent canvas-sized Image if the layer does not exist, preventing null pointer segfaults.",
-    {
-      code: z
-        .string()
-        .describe("GDScript code. Can define 'func run(api, image: Image, project, params: Dictionary):' (can return Image, PackedByteArray, or custom value) or provide bare script statements that mutate 'image'."),
-      layer: layerHandleSchema,
-      frame: coerceInt(0).optional().describe("Optional target frame index (defaults to active frame)"),
-      params: z
-        .record(z.any())
-        .optional()
-        .describe("Optional key-value parameters dictionary passed into script (e.g. { width: 320, height: 180 })"),
-      record_undo: coerceBool()
-        .optional()
-        .describe("If true (default), records this change in Pixelorama's Undo/Redo history. Set to false during heavy multi-layer bulk procedural generation passes to drastically conserve editor memory."),
-    },
-    async ({ code, layer, frame, params, record_undo }) => {
-      const result = await sendCommand("eval_gdscript", { code, layer, frame, params: params ?? {}, record_undo: record_undo ?? true }, 120_000);
-      const resVal = result.data?.result;
-      const val = result.data?.value;
-      const resStr = resVal !== undefined ? JSON.stringify(resVal) : "completed";
-      const valStr = val !== null && val !== undefined ? `\nValue: ${typeof val === "object" ? JSON.stringify(val, null, 2) : String(val)}` : "";
-      const warnStr = result.data?.warning ? `\n${result.data.warning}` : "";
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: result.success
-              ? `⚡ GDScript executed successfully on [frame:${result.data?.frame}, layer:${result.data?.layer}]: ${resStr}${valStr}${warnStr}`
-              : `❌ ${result.error}`,
-          },
-        ],
-      };
-    }
-  );
+  // eval_gdscript removed in the hardened fork (arbitrary code execution inside Pixelorama).
+
 }

@@ -10,6 +10,7 @@ import { z } from "zod";
 import * as fs from "fs";
 import * as path from "path";
 import { sendCommand } from "../bridge/pixelorama_client.js";
+import { assertAllowedPath } from "../utils/security.js";
 import { coerceInt, coerceBool } from "../utils/schema_helpers.js";
 
 export function registerTilemapTools(server: McpServer): void {
@@ -89,6 +90,11 @@ export function registerTilemapTools(server: McpServer): void {
       const rows = Math.floor(height / tile_size);
       const totalTiles = cols * rows;
 
+      try {
+        assertAllowedPath(export_path, "export_path");
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: `❌ ${err instanceof Error ? err.message : String(err)}` }] };
+      }
       // Ensure directory exists
       const targetDir = path.dirname(export_path);
       if (!fs.existsSync(targetDir)) {

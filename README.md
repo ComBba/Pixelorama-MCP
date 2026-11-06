@@ -1,3 +1,5 @@
+> **Hardened fork** (ComBba/Pixelorama-MCP, branch `hardened`): token auth, browser/DNS-rebinding refusal, no CORS, path allow-list, arbitrary-code tool removed, Pixelorama 1.2.4 sparse-cel fix. Read [HARDENING.md](HARDENING.md) first; parts of the README below describe upstream behaviour (prebuilt PCK, removed tool) that no longer apply.
+
 <div align="center">
 
 # 🎨 Pixelorama-MCP

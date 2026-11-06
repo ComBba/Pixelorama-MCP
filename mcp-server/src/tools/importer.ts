@@ -3,6 +3,7 @@ import { z } from "zod";
 import * as fs from "fs";
 import * as zlib from "zlib";
 import { sendCommand } from "../bridge/pixelorama_client.js";
+import { assertAllowedPath } from "../utils/security.js";
 import { coerceInt, coerceFloat, coerceBool, safeJsonArray } from "../utils/schema_helpers.js";
 
 // Helper: Paeth Predictor for raw PNG scanline filtering
@@ -178,6 +179,11 @@ export function registerImporterTools(server: McpServer): void {
       create_new_canvas,
       canvas_name,
     }) => {
+      try {
+        assertAllowedPath(file_path, "file_path");
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: `❌ ${err instanceof Error ? err.message : String(err)}` }] };
+      }
       if (!fs.existsSync(file_path)) {
         return {
           content: [{ type: "text" as const, text: `❌ File not found at path: ${file_path}` }],

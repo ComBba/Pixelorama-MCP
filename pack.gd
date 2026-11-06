@@ -1,64 +1,40 @@
+## Build PixMcpBridge.pck from the reviewed sources (hardened fork).
+## Usage (from the repo root):  godot --headless --script pack.gd
+## Writes ONLY ./PixMcpBridge.pck. Install it yourself (Pixelorama > Preferences > Extensions) and
+## record its SHA-256; nothing is copied into Pixelorama's data directory by this script.
+## Shaders come from the official Pixelorama source (MIT): place them in pixelorama-source/addons/gdgifexporter/.
 extends SceneTree
 
-func _init():
-	var packer = PCKPacker.new()
-	var err = packer.pck_start("PixMcpBridge.pck")
-	if err != OK:
-		print("Error starting PCK: %s" % err)
+const PREFIX := "res://src/Extensions/PixMcpBridge/"
+const PLUGIN_FILES := ["extension.json", "Main.tscn", "Main.gd", "command_handler.gd", "security.gd"]
+
+
+func _init() -> void:
+	var packer := PCKPacker.new()
+	if packer.pck_start("PixMcpBridge.pck") != OK:
+		push_error("cannot start PCK")
 		quit(1)
 		return
-
-	var prefix = "res://src/Extensions/PixMcpBridge/"
-	var plugin_dir = "pixelorama-plugin/"
-	if not FileAccess.file_exists(plugin_dir + "extension.json"):
-		if FileAccess.file_exists("res://pixelorama-plugin/extension.json"):
-			plugin_dir = "res://pixelorama-plugin/"
-
-	packer.add_file(prefix + "extension.json", plugin_dir + "extension.json")
-	packer.add_file(prefix + "Main.tscn", plugin_dir + "Main.tscn")
-	packer.add_file(prefix + "Main.gd", plugin_dir + "Main.gd")
-	packer.add_file(prefix + "command_handler.gd", plugin_dir + "command_handler.gd")
-
-	# Package GIF exporter shaders to fix root/relative load resolution in Godot 4
-	var similar_shader = "pixelorama-source/addons/gdgifexporter/lookup_similar.gdshader"
-	var color_shader = "pixelorama-source/addons/gdgifexporter/lookup_color.gdshader"
-	if FileAccess.file_exists(similar_shader):
-		packer.add_file("res://lookup_similar.gdshader", similar_shader)
-		packer.add_file("res://addons/gdgifexporter/lookup_similar.gdshader", similar_shader)
-	if FileAccess.file_exists(color_shader):
-		packer.add_file("res://lookup_color.gdshader", color_shader)
-		packer.add_file("res://addons/gdgifexporter/lookup_color.gdshader", color_shader)
-	if FileAccess.file_exists(plugin_dir + "converter.gd"):
-		packer.add_file("res://addons/gdgifexporter/converter.gd", plugin_dir + "converter.gd")
-
-	err = packer.flush(true)
-	if err != OK:
-		print("Error flushing PCK: %s" % err)
+	for f in PLUGIN_FILES:
+		var src: String = "pixelorama-plugin/" + str(f)
+		if not FileAccess.file_exists(src):
+			push_error("missing " + src)
+			quit(1)
+			return
+		packer.add_file(PREFIX + f, src)
+	# GIF exporter shaders / converter, resolved from the extension (same layout as upstream).
+	for shader in ["lookup_similar.gdshader", "lookup_color.gdshader"]:
+		var s: String = "pixelorama-source/addons/gdgifexporter/" + str(shader)
+		if FileAccess.file_exists(s):
+			packer.add_file("res://" + shader, s)
+			packer.add_file("res://addons/gdgifexporter/" + shader, s)
+		else:
+			print("note: %s not found; GIF export may be unavailable" % s)
+	if FileAccess.file_exists("pixelorama-plugin/converter.gd"):
+		packer.add_file("res://addons/gdgifexporter/converter.gd", "pixelorama-plugin/converter.gd")
+	if packer.flush(true) != OK:
+		push_error("cannot flush PCK")
 		quit(1)
 		return
-
 	print("Successfully packed PixMcpBridge.pck")
-
-	# Copy to extension directories
-	var copy_paths = [
-		"pixelorama-plugin/PixMcpBridge.pck",
-		"/home/abido/.local/share/pixelorama/extensions/PixMcpBridge.pck",
-		"/home/abido/.local/share/pixelorama/Extensions/PixMcpBridge.pck",
-		"/home/abido/Downloads/Pixelorama-Linux-64bit/pixelorama_data/Extensions/PixMcpBridge.pck",
-		"/home/abido/Downloads/Pixelorama-Linux-64bit/pixelorama_data/extensions/PixMcpBridge.pck"
-	]
-	var src = FileAccess.open("PixMcpBridge.pck", FileAccess.READ)
-	if src:
-		var bytes = src.get_buffer(src.get_length())
-		src.close()
-		for path in copy_paths:
-			var dir = path.get_base_dir()
-			if not DirAccess.dir_exists_absolute(dir):
-				DirAccess.make_dir_recursive_absolute(dir)
-			var dst = FileAccess.open(path, FileAccess.WRITE)
-			if dst:
-				dst.store_buffer(bytes)
-				dst.close()
-				print("Copied to %s" % path)
-
 	quit(0)

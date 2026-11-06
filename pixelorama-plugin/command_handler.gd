@@ -66,7 +66,6 @@ func _register_tools() -> void:
 	_tool_registry["mirror_layer"] = Callable(self, "_cmd_mirror_layer")
 	_tool_registry["transform_cel"] = Callable(self, "_cmd_transform_cel")
 	_tool_registry["rotate_cel"] = Callable(self, "_cmd_rotate_cel")
-	_tool_registry["eval_gdscript"] = Callable(self, "_cmd_eval_gdscript")
 
 	# Inspection & QA
 	_tool_registry["get_pixel"] = Callable(self, "_cmd_get_pixel")
@@ -141,9 +140,22 @@ func get_available_tools() -> Array:
 	return tools
 
 
+var _security: RefCounted = null
+
+
+func set_security(security: RefCounted) -> void:
+	_security = security
+
+
 func execute(tool_name: String, params: Dictionary) -> Dictionary:
 	if not _tool_registry.has(tool_name):
 		return {"success": false, "error": "Unknown tool: %s" % tool_name}
+	# Hardened fork: every command passes one path gate (fail-closed when security is missing).
+	if _security == null:
+		return {"success": false, "error": "Bridge security not initialised"}
+	var path_error: String = _security.check_params(params)
+	if not path_error.is_empty():
+		return {"success": false, "error": path_error}
 
 	print(LOG_TAG + "Executing: %s" % tool_name)
 	var callable: Callable = _tool_registry[tool_name]
@@ -153,6 +165,31 @@ func execute(tool_name: String, params: Dictionary) -> Dictionary:
 # ─────────────────────────────────────────────
 # SHARED HELPERS
 # ─────────────────────────────────────────────
+
+## Hardened fork / Pixelorama 1.2.4 compatibility: cels became sparse (image = used rect, placed by
+## `offset`; an empty cel is 1x1). All commands here assume a canvas-sized cel at offset 0, so expand
+## the cel first. Visual content is unchanged; offset/size are part of Pixelorama's undo data.
+func _norm(cel) -> Image:
+	if cel == null:
+		return null
+	var project = _api.project.current_project
+	if project != null and cel.get_class_name() == "PixelCel" and "offset" in cel and cel.has_method("resize_cel_image"):
+		var size: Vector2i = Vector2i(project.size)
+		var off: Vector2i = cel.offset
+		if off != Vector2i.ZERO or Vector2i(cel.image.get_size()) != size:
+			cel.resize_cel_image(size, off)
+			cel.change_offset(Vector2i.ZERO)
+	return cel.image if "image" in cel else null
+
+
+## Hardened fork: Image.duplicate() on Pixelorama 1.2.4 cel images (ImageExtended) yields an empty
+## 1x1 image, so every read/modify/commit silently drew nothing. Copy the pixel data explicitly.
+static func _copy_image(src: Image) -> Image:
+	var out := Image.new()
+	if src != null:
+		out.copy_from(src)
+	return out
+
 
 func _get_or_create_layer_id(layer: Object) -> String:
 	if layer == null:
@@ -250,7 +287,7 @@ func _get_current_image() -> Image:
 	var cel = _get_current_cel()
 	if cel == null or cel.get_class_name() != "PixelCel":
 		return null
-	return cel.get_image().duplicate()
+	return _copy_image(_norm(cel))
 
 
 func _get_target_cel_and_image(params: Dictionary) -> Dictionary:
@@ -270,7 +307,7 @@ func _get_target_cel_and_image(params: Dictionary) -> Dictionary:
 	if cel == null or cel.get_class_name() != "PixelCel":
 		return {"error": "Cel at [frame:%d, layer:%d] is not a PixelCel" % [frame_idx, layer_idx], "image": null, "frame": frame_idx, "layer": layer_idx}
 
-	return {"error": "", "image": cel.get_image().duplicate(), "frame": frame_idx, "layer": layer_idx, "cel": cel}
+	return {"error": "", "image": _copy_image(_norm(cel)), "frame": frame_idx, "layer": layer_idx, "cel": cel}
 
 
 func _commit_image_change(image: Image, action_name: String, frame_idx: int = -1, layer_idx: int = -1, record_undo: bool = true) -> void:
@@ -294,7 +331,7 @@ func _commit_image_change(image: Image, action_name: String, frame_idx: int = -1
 	if cel == null or cel.get_class_name() != "PixelCel":
 		return
 
-	var cel_image: Image = cel.get_image()
+	var cel_image: Image = _norm(cel)
 	image.convert(project.get_image_format())
 
 	var ur = project.undo_redo if record_undo else null
@@ -413,7 +450,7 @@ func _cmd_create_canvas(params: Dictionary) -> Dictionary:
 		if fill_color.a > 0.0 and project.frames.size() > 0 and project.frames[0].cels.size() > 0:
 			var cel = project.frames[0].cels[0]
 			if cel != null and cel.has_method("get_image"):
-				var c_img: Image = cel.get_image()
+				var c_img: Image = _norm(cel)
 				if c_img:
 					c_img.fill(fill_color)
 				if cel.has_method("update_texture"):
@@ -951,7 +988,7 @@ func _cmd_crop_to_content(_params: Dictionary) -> Dictionary:
 	var used_rect := Rect2i()
 	for cel in project.get_all_pixel_cels():
 		if cel.get_class_name() == "PixelCel":
-			var cel_used: Rect2i = cel.get_image().get_used_rect()
+			var cel_used: Rect2i = _norm(cel).get_used_rect()
 			if cel_used != Rect2i(0, 0, 0, 0):
 				if used_rect == Rect2i(0, 0, 0, 0):
 					used_rect = cel_used
@@ -1012,7 +1049,7 @@ func _cmd_scale_canvas(params: Dictionary) -> Dictionary:
 	for f in project.frames:
 		for cel in f.cels:
 			if cel.get_class_name() == "PixelCel":
-				var img: Image = cel.get_image()
+				var img: Image = _norm(cel)
 				img.resize(new_w, new_h, interpolation)
 
 	project.size = Vector2i(new_w, new_h)
@@ -1746,7 +1783,7 @@ func _cmd_apply_outline(params: Dictionary) -> Dictionary:
 
 	var w := image.get_width()
 	var h := image.get_height()
-	var outlined_img := image.duplicate()
+	var outlined_img := _copy_image(image)
 	var count := 0
 
 	for y in range(h):
@@ -1801,7 +1838,7 @@ func _cmd_mirror_layer(params: Dictionary) -> Dictionary:
 	var mode: String = str(params.get("mode", "flip"))
 	var w := image.get_width()
 	var h := image.get_height()
-	var new_img := image.duplicate()
+	var new_img := _copy_image(image)
 
 	if mode == "mirror_left_to_right":
 		var half_w := w / 2
@@ -1877,7 +1914,7 @@ func _cmd_rotate_cel(params: Dictionary) -> Dictionary:
 	var image: Image = target.image
 	var angle: int = int(params.get("angle", 90))
 
-	var new_image: Image = image.duplicate()
+	var new_image: Image = _copy_image(image)
 	if angle == 90:
 		new_image.rotate_90(CLOCKWISE)
 	elif angle == 180:
@@ -2027,7 +2064,7 @@ func _cmd_color_replace(params: Dictionary) -> Dictionary:
 
 	var w := image.get_width()
 	var h := image.get_height()
-	var modified_img := image.duplicate()
+	var modified_img := _copy_image(image)
 	var replaced_count := 0
 
 	for y in range(h):
@@ -2058,7 +2095,7 @@ func _cmd_adjust_hsv(params: Dictionary) -> Dictionary:
 
 	var w := image.get_width()
 	var h := image.get_height()
-	var modified_img := image.duplicate()
+	var modified_img := _copy_image(image)
 	var modified_count := 0
 
 	for y in range(h):
@@ -2514,7 +2551,7 @@ func _cmd_duplicate_frame(params: Dictionary) -> Dictionary:
 			new_cel.set_content(src_cel.copy_content())
 
 		if new_cel.get_class_name() == "PixelCel":
-			var img: Image = new_cel.get_image()
+			var img: Image = _norm(new_cel)
 			if img:
 				for y in range(img.get_height()):
 					for x in range(img.get_width()):
@@ -2679,7 +2716,7 @@ func _cmd_copy_cel(params: Dictionary) -> Dictionary:
 		return {"success": false, "error": "Destination cel is not a PixelCel"}
 
 	# Deep-clone pixels from source to destination
-	var src_image: Image = src_cel.get_image()
+	var src_image: Image = _norm(src_cel)
 	var copy_img = Image.create_empty(src_image.get_width(), src_image.get_height(), false, Image.FORMAT_RGBA8)
 	copy_img.copy_from(src_image)
 
@@ -3770,7 +3807,7 @@ func _cmd_tween_cel(params: Dictionary) -> Dictionary:
 	if src_cel.get_class_name() != "PixelCel":
 		return {"success": false, "error": "Source cel is not a PixelCel"}
 
-	var base_img = src_cel.get_image()
+	var base_img = _norm(src_cel)
 	var step_dir := 1 if dst_frame > src_frame else -1
 
 	for step in range(1, span + 1):
@@ -3936,7 +3973,7 @@ func _cmd_duplicate_layer(params: Dictionary) -> Dictionary:
 	for f in range(project.frames.size()):
 		var src_cel = project.frames[f].cels[src_idx]
 		if src_cel.get_class_name() == "PixelCel":
-			var src_img = src_cel.get_image()
+			var src_img = _norm(src_cel)
 			var clone_img = Image.create_empty(src_img.get_width(), src_img.get_height(), false, Image.FORMAT_RGBA8)
 			clone_img.copy_from(src_img)
 			_api.project.set_pixelcel_image(clone_img, f, new_layer_idx)
@@ -3988,8 +4025,8 @@ func _cmd_merge_layers(params: Dictionary) -> Dictionary:
 		var src_cel = project.frames[f].cels[src_idx]
 		var dst_cel = project.frames[f].cels[dst_idx]
 		if src_cel.get_class_name() == "PixelCel" and dst_cel.get_class_name() == "PixelCel":
-			var src_img = src_cel.get_image()
-			var dst_img = dst_cel.get_image()
+			var src_img = _norm(src_cel)
+			var dst_img = _norm(dst_cel)
 			var blended = Image.create_empty(dst_img.get_width(), dst_img.get_height(), false, Image.FORMAT_RGBA8)
 			blended.copy_from(dst_img)
 			blended.blend_rect(src_img, Rect2i(Vector2i.ZERO, src_img.get_size()), Vector2i.ZERO)
@@ -4227,7 +4264,7 @@ func _cmd_apply_glow(params: Dictionary) -> Dictionary:
 			project.layers[glow_layer_idx].blend_mode = 9  # BaseLayer.BlendModes.ADD
 		_api.project.set_pixelcel_image(glow_img, target.frame, glow_layer_idx)
 	else:
-		var composite := img.duplicate()
+		var composite := _copy_image(img)
 		for gy in range(h):
 			for gx in range(w):
 				var g_px: Color = glow_img.get_pixel(gx, gy)
@@ -4864,7 +4901,7 @@ func _composite_frame_layers(project, frame_idx: int) -> Image:
 		if cel == null or not cel.has_method("get_image"):
 			continue
 
-		var cel_img: Image = cel.get_image()
+		var cel_img: Image = _norm(cel)
 		if cel_img == null or cel_img.is_empty():
 			continue
 
@@ -4876,7 +4913,7 @@ func _composite_frame_layers(project, frame_idx: int) -> Image:
 			continue
 
 		if final_opacity < 0.999:
-			var src: Image = cel_img.duplicate()
+			var src: Image = _copy_image(cel_img)
 			var sw: int = src.get_width()
 			var sh: int = src.get_height()
 			for y in range(sh):
@@ -5221,7 +5258,7 @@ class ApiContext extends RefCounted:
 		var cel = _project.frames[f_idx].cels[l_idx]
 		if cel == null or cel.get_class_name() != "PixelCel":
 			return Color.TRANSPARENT
-		var img: Image = cel.get_image()
+		var img: Image = _handler._norm(cel)
 		if img == null or x < 0 or x >= img.get_width() or y < 0 or y >= img.get_height():
 			return Color.TRANSPARENT
 		return img.get_pixel(x, y)
@@ -5239,10 +5276,12 @@ class ApiContext extends RefCounted:
 		var cel = _project.frames[f_idx].cels[l_idx]
 		if cel == null or cel.get_class_name() != "PixelCel":
 			return Image.create(w, h, false, Image.FORMAT_RGBA8) if fallback_empty else null
-		var img: Image = cel.get_image()
+		var img: Image = _handler._norm(cel)
 		if img == null:
 			return Image.create(w, h, false, Image.FORMAT_RGBA8) if fallback_empty else null
-		return img.duplicate()
+		var copy := Image.new()
+		copy.copy_from(img)
+		return copy
 
 	func has_layer(layer) -> bool:
 		if _project == null:
@@ -5410,319 +5449,4 @@ func _extract_runtime_error_from_log(log_tail: String, full_source: String) -> S
 	return ""
 
 
-func _cmd_eval_gdscript(params: Dictionary) -> Dictionary:
-	var code: String = params.get("code", "")
-	if code.strip_edges() == "":
-		return {"success": false, "error": "Missing or empty code to evaluate"}
-
-	var target := _get_target_cel_and_image(params)
-	if target.error != "":
-		return {"success": false, "error": target.error}
-
-	var image: Image = target.image
-	var frame_idx: int = target.frame
-	var layer_idx: int = target.layer
-	var project = _api.project.current_project
-
-	var script_params: Dictionary = {}
-	if params.has("params") and (params["params"] is Dictionary):
-		script_params = params["params"]
-	var record_undo: bool = bool(params.get("record_undo", true))
-
-	var full_source := ""
-	if code.find("func execute") != -1 or code.find("func run") != -1:
-		if not code.begins_with("extends"):
-			full_source = "extends RefCounted\n\n" + code
-		else:
-			full_source = code
-	else:
-		full_source = "extends RefCounted\n\nfunc run(api, image: Image, project, params: Dictionary) -> Variant:\n"
-		var lines := code.split("\n")
-		var min_indent := -1
-		for line in lines:
-			var stripped := line.strip_edges()
-			if stripped == "":
-				continue
-			var count := 0
-			for i in range(line.length()):
-				var ch := line[i]
-				if ch == " " or ch == "\t":
-					count += 1
-				else:
-					break
-			if min_indent == -1 or count < min_indent:
-				min_indent = count
-		if min_indent == -1:
-			min_indent = 0
-
-		for line in lines:
-			var stripped := line.strip_edges()
-			if stripped == "":
-				full_source += "\n"
-				continue
-			var count := 0
-			var idx := 0
-			while idx < line.length() and count < min_indent:
-				var ch := line[idx]
-				if ch == " " or ch == "\t":
-					count += 1
-					idx += 1
-				else:
-					break
-			var rel_line := line.substr(idx)
-			var rel_tabs := ""
-			while rel_line.begins_with("    "):
-				rel_tabs += "\t"
-				rel_line = rel_line.substr(4)
-			while rel_line.begins_with("  "):
-				rel_tabs += "\t"
-				rel_line = rel_line.substr(2)
-			while rel_line.begins_with("\t"):
-				rel_tabs += "\t"
-				rel_line = rel_line.substr(1)
-			full_source += "\t" + rel_tabs + rel_line + "\n"
-		full_source += "\treturn null\n"
-
-	# Transparent bounds guarding: rewrite .set_pixel and non-api .get_pixel calls to prevent native Godot SIGSEGV heap overflows
-	var regex_set_px := RegEx.new()
-	regex_set_px.compile("\\b([a-zA-Z0-9_]+)\\.set_pixel\\s*\\(")
-	if regex_set_px.is_valid():
-		full_source = regex_set_px.sub(full_source, "_safe_set_pixel($1, ", true)
-
-	var regex_get_px := RegEx.new()
-	regex_get_px.compile("\\b(?!(?:api)\\b)([a-zA-Z0-9_]+)\\.get_pixel\\s*\\(")
-	if regex_get_px.is_valid():
-		full_source = regex_get_px.sub(full_source, "_safe_get_pixel($1, ", true)
-
-	# Safe get_width / get_height guarding: rewrite .get_width() and .get_height() calls to prevent native SIGSEGV on null instances
-	var regex_get_w := RegEx.new()
-	regex_get_w.compile("\\b([a-zA-Z0-9_]+)\\.get_width\\s*\\(\\s*\\)")
-	if regex_get_w.is_valid():
-		full_source = regex_get_w.sub(full_source, "_safe_get_width($1)", true)
-
-	var regex_get_h := RegEx.new()
-	regex_get_h.compile("\\b([a-zA-Z0-9_]+)\\.get_height\\s*\\(\\s*\\)")
-	if regex_get_h.is_valid():
-		full_source = regex_get_h.sub(full_source, "_safe_get_height($1)", true)
-
-	# Safe cast guarding: strip inline unsafe casts like '(expr as PackedFloat32Array)[x]' or 'expr as Array[x]'
-	# In Godot release builds, static indexing on 'as Packed*Array' crashes C++ with SIGSEGV if the cast yields null.
-	# Stripping 'as Packed*Array' allows dynamic Variant indexing, which safely raises a GDScript error instead of crashing.
-	var regex_unsafe_cast := RegEx.new()
-	regex_unsafe_cast.compile("\\s*\\bas\\s+(?:Packed[A-Za-z0-9]+Array|Array)(?=\\s*\\)\\s*\\[|\\s*\\[)")
-	if regex_unsafe_cast.is_valid():
-		full_source = regex_unsafe_cast.sub(full_source, "", true)
-
-	var safe_helpers := "\n\nstatic var _clipped_pixel_count: int = 0\n\nstatic func _safe_get_width(img: Variant) -> int:\n\tif img != null and img.has_method(\"get_width\"):\n\t\treturn img.get_width()\n\treturn 0\n\nstatic func _safe_get_height(img: Variant) -> int:\n\tif img != null and img.has_method(\"get_height\"):\n\t\treturn img.get_height()\n\treturn 0\n\nstatic func _safe_set_pixel(img: Variant, px: int, py: int, col: Color) -> void:\n\tif img != null and img.has_method(\"set_pixel\") and img.has_method(\"get_width\") and img.has_method(\"get_height\"):\n\t\tif px >= 0 and py >= 0 and px < img.get_width() and py < img.get_height():\n\t\t\timg.set_pixel(px, py, col)\n\t\t\treturn\n\t_clipped_pixel_count += 1\n\nstatic func _safe_get_pixel(img: Variant, px: int, py: int) -> Color:\n\tif img != null and img.has_method(\"get_pixel\") and img.has_method(\"get_width\") and img.has_method(\"get_height\"):\n\t\tif px >= 0 and py >= 0 and px < img.get_width() and py < img.get_height():\n\t\t\treturn img.get_pixel(px, py)\n\treturn Color(0, 0, 0, 0)\n"
-	full_source += safe_helpers
-
-	var log_pos_before_compile := _get_godot_log_pos()
-	var script := GDScript.new()
-	script.source_code = full_source
-	var err = script.reload()
-
-	# Auto-fallback: If ERR_PARSE_ERROR (43), check if static type inference ':=' on Variant failed
-	if err != OK:
-		var regex_infer := RegEx.new()
-		regex_infer.compile("\\bvar\\s+([a-zA-Z_]\\w*)\\s*:=")
-		if regex_infer.is_valid() and regex_infer.search(full_source) != null:
-			var patched_source := regex_infer.sub(full_source, "var $1 =", true)
-			var retry_script := GDScript.new()
-			retry_script.source_code = patched_source
-			var retry_err = retry_script.reload()
-			if retry_err == OK:
-				script = retry_script
-				full_source = patched_source
-				err = OK
-
-	if err != OK:
-		OS.delay_msec(25)
-		var log_tail := _extract_godot_log_tail(log_pos_before_compile)
-		var parse_err := _extract_compile_error_from_log(log_tail, full_source)
-		if parse_err == "":
-			log_tail = _extract_godot_log_tail(-1)
-			parse_err = _extract_compile_error_from_log(log_tail, full_source)
-		var err_str := "Failed to compile GDScript (Error code %d)" % err
-		if parse_err != "":
-			err_str = "Failed to compile GDScript: %s" % parse_err
-		return {
-			"success": false,
-			"error": err_str,
-			"source": full_source
-		}
-
-	var instance = script.new()
-	if instance == null:
-		return {"success": false, "error": "Failed to instantiate GDScript"}
-
-	if instance.get("_clipped_pixel_count") != null:
-		instance.set("_clipped_pixel_count", 0)
-
-	var method_name := ""
-	var method_info: Dictionary = {}
-	if instance.has_method("run"):
-		method_name = "run"
-	elif instance.has_method("execute"):
-		method_name = "execute"
-	else:
-		return {"success": false, "error": "Script must define 'run(api, image, project, params)' or 'execute(api, image, project, params)'"}
-
-	for m in instance.get_method_list():
-		if m["name"] == method_name:
-			method_info = m
-			break
-
-	var api_ctx = ApiContext.new(_api, project, self)
-
-	var call_args: Array = []
-	var m_args: Array = method_info.get("args", [])
-	for arg in m_args:
-		var aname: String = str(arg.get("name", "")).to_lower()
-		var cname: String = str(arg.get("class_name", ""))
-		if aname in ["image", "img", "cel"] or cname == "Image":
-			call_args.append(image)
-		elif aname in ["params", "dict", "parameters"]:
-			call_args.append(script_params)
-		elif aname in ["project", "proj"]:
-			call_args.append(project)
-		elif aname in ["api", "extensions_api", "node"]:
-			call_args.append(api_ctx)
-		else:
-			var pos := call_args.size()
-			if pos == 0:
-				call_args.append(api_ctx)
-			elif pos == 1:
-				call_args.append(image)
-			elif pos == 2:
-				call_args.append(project)
-			elif pos == 3:
-				call_args.append(script_params)
-			else:
-				call_args.append(null)
-
-	var log_pos_before_run := _get_godot_log_pos()
-	var result = instance.callv(method_name, call_args)
-
-	OS.delay_msec(25)
-	var log_tail_run := _extract_godot_log_tail(log_pos_before_run)
-	var runtime_err := _extract_runtime_error_from_log(log_tail_run, full_source)
-	if runtime_err != "":
-		return {
-			"success": false,
-			"error": "GDScript runtime error: %s" % runtime_err,
-			"source": full_source
-		}
-
-	var clipped_pixels: int = 0
-	if instance.get("_clipped_pixel_count") != null:
-		clipped_pixels = int(instance.get("_clipped_pixel_count"))
-
-	var resized_canvas := false
-	var prev_size = project.size if project != null else Vector2i.ZERO
-
-	if result is Image:
-		if result.get_size() != project.size:
-			var new_w: int = int(result.get_width())
-			var new_h: int = int(result.get_height())
-			resized_canvas = true
-			for f in project.frames:
-				for cel in f.cels:
-					if cel.get_class_name() == "PixelCel":
-						var cimg: Image = cel.get_image()
-						cimg.resize(new_w, new_h, Image.INTERPOLATE_NEAREST)
-			project.size = Vector2i(new_w, new_h)
-			var canvas_node = _api.general.get_canvas()
-			if canvas_node:
-				var cam = canvas_node.get("camera")
-				if cam and cam.has_method("fit_to_frame"):
-					cam.fit_to_frame()
-		image = result
-	elif result is PackedByteArray:
-		var w := int(project.size.x)
-		var h := int(project.size.y)
-		if script_params.has("width") and script_params.has("height"):
-			var pw := int(script_params["width"])
-			var ph := int(script_params["height"])
-			if pw > 0 and ph > 0 and (result.size() == pw * ph * 4 or result.size() == pw * ph * 3):
-				w = pw
-				h = ph
-				if Vector2i(w, h) != project.size:
-					resized_canvas = true
-					for f in project.frames:
-						for cel in f.cels:
-							if cel.get_class_name() == "PixelCel":
-								var cimg: Image = cel.get_image()
-								cimg.resize(w, h, Image.INTERPOLATE_NEAREST)
-					project.size = Vector2i(w, h)
-					var canvas_node = _api.general.get_canvas()
-					if canvas_node:
-						var cam = canvas_node.get("camera")
-						if cam and cam.has_method("fit_to_frame"):
-							cam.fit_to_frame()
-		if result.size() == w * h * 4:
-			var img_from_bytes := Image.create_from_data(w, h, false, Image.FORMAT_RGBA8, result)
-			if img_from_bytes:
-				image = img_from_bytes
-		elif result.size() == w * h * 3:
-			var img_from_bytes := Image.create_from_data(w, h, false, Image.FORMAT_RGB8, result)
-			if img_from_bytes:
-				img_from_bytes.convert(Image.FORMAT_RGBA8)
-				image = img_from_bytes
-		else:
-			return {
-				"success": false,
-				"error": "PackedByteArray size %d does not match canvas dimensions %dx%d (expected %d bytes for RGBA8 or %d for RGB8). Note: Canvas size is %dx%d; use 'create_canvas' to match your intended buffer dimensions." % [result.size(), w, h, w * h * 4, w * h * 3, int(project.size.x), int(project.size.y)],
-				"source": full_source
-			}
-
-	if image != null:
-		_commit_image_change(image, "Eval GDScript", frame_idx, layer_idx, record_undo)
-		OS.delay_msec(1)
-
-	var canvas = _api.general.get_canvas()
-	if canvas:
-		if "project_changed" in canvas:
-			canvas.project_changed = true
-		canvas.set("update_all_layers", true)
-		canvas.queue_redraw()
-
-	var result_repr = result
-	if result is Image:
-		result_repr = "Image updated"
-	elif result is PackedByteArray:
-		result_repr = "Image buffer updated"
-
-	var result_data := {
-		"result": result_repr,
-		"value": result if not (result is Image or result is PackedByteArray) else null,
-		"frame": frame_idx,
-		"layer": layer_idx
-	}
-	if resized_canvas:
-		result_data["canvas_resized"] = true
-		result_data["previous_size"] = [int(prev_size.x), int(prev_size.y)]
-		result_data["new_size"] = [int(project.size.x), int(project.size.y)]
-		var resize_warn := "⚠️ Canvas automatically resized from %dx%d to %dx%d because returned buffer had different dimensions." % [int(prev_size.x), int(prev_size.y), int(project.size.x), int(project.size.y)]
-		if result_data.has("warning"):
-			result_data["warning"] += "\n" + resize_warn
-		else:
-			result_data["warning"] = resize_warn
-	if clipped_pixels > 0:
-		result_data["clipped_pixels"] = clipped_pixels
-		var clip_warn := "⚠️ %d pixel writes were clipped outside canvas bounds (%dx%d). Use 'create_canvas' to expand canvas dimensions if you intended a larger drawing area!" % [clipped_pixels, int(project.size.x), int(project.size.y)]
-		if result_data.has("warning"):
-			result_data["warning"] += "\n" + clip_warn
-		else:
-			result_data["warning"] = clip_warn
-		if result_repr == null or str(result_repr) == "ok" or str(result_repr) == "":
-			result_data["result"] = "⚠️ %d pixels clipped outside canvas bounds (%dx%d)" % [clipped_pixels, int(project.size.x), int(project.size.y)]
-		else:
-			result_data["result"] = "%s (⚠️ %d pixels clipped outside %dx%d canvas)" % [str(result_repr), clipped_pixels, int(project.size.x), int(project.size.y)]
-
-	return {
-		"success": true,
-		"data": result_data
-	}
-
-
-
+# eval_gdscript removed in the hardened fork: it compiled and ran arbitrary agent-supplied GDScript.

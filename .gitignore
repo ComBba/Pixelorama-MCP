@@ -48,3 +48,6 @@ backups/
 scratch/
 pixelorama-source/
 test_out*
+
+# Hardened fork: build PixMcpBridge.pck from source, never commit binaries
+*.pck
