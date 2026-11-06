@@ -158,6 +158,52 @@ func check_params(tool_name: String, params: Dictionary) -> String:
 	return ""
 
 
+## open_project hands the file to Pixelorama's own loader, which (v1.2.4) can `load()` a PackedScene
+## embedded for 3D layers (its script guard is a substring test) and runs `str_to_var` on cel
+## `image_size`; the legacy non-zip format has its own loader. Refuse anything outside the safe subset.
+func check_pxo(path: String) -> String:
+	if path.get_extension().to_lower() != "pxo":
+		return "open_project only opens .pxo files"
+	var zr := ZIPReader.new()
+	if zr.open(path) != OK:
+		return "Refusing .pxo: not a zip-format project (legacy v0 format is not accepted)"
+	for f in zr.get_files():
+		if str(f).begins_with("scene/"):
+			zr.close()
+			return "Refusing .pxo: contains 3D layer scenes (scene/...), which Pixelorama loads as code-capable resources"
+	var data: Variant = JSON.parse_string(zr.read_file("data.json").get_string_from_utf8())
+	zr.close()
+	if not data is Dictionary:
+		return "Refusing .pxo: data.json missing or not an object"
+	# Genuine saves use "Vector2i(8, 8)" (tile_size is stored bare and prefixed at load): integers only.
+	var vec := RegEx.create_from_string("^(Vector2i?)?\\(\\s*-?\\d{1,5}\\s*,\\s*-?\\d{1,5}\\s*\\)$")
+	for frame in data.get("frames", []):
+		if frame is Dictionary:
+			for cel in frame.get("cels", []):
+				if cel is Dictionary and cel.has("image_size") and vec.search(str(cel["image_size"])) == null:
+					return "Refusing .pxo: cel image_size is not a plain (w, h) pair"
+	for ts in data.get("tilesets", []):
+		if ts is Dictionary and ts.has("tile_size") and vec.search(str(ts["tile_size"])) == null:
+			return "Refusing .pxo: tileset tile_size is not a plain (w, h) pair"
+	if _contains_object_literal(data):
+		return "Refusing .pxo: serialized object literal found in data.json"
+	return ""
+
+
+static func _contains_object_literal(v: Variant) -> bool:
+	if v is String:
+		return (v as String).find("Object(") != -1
+	if v is Dictionary:
+		for k in v:
+			if _contains_object_literal(k) or _contains_object_literal(v[k]):
+				return true
+	if v is Array:
+		for x in v:
+			if _contains_object_literal(x):
+				return true
+	return false
+
+
 static func constant_time_equals(a: String, b: String) -> bool:
 	var ab := a.to_utf8_buffer()
 	var bb := b.to_utf8_buffer()

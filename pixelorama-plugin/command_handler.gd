@@ -158,6 +158,10 @@ func execute(tool_name: String, params: Dictionary) -> Dictionary:
 		return {"success": false, "error": path_error}
 	# save_project without an explicit path would write to project.save_path, which may lie outside
 	# the allowed roots (a project opened from the GUI). Require an explicit, checked path.
+	if tool_name == "open_project":
+		var pxo_error: String = _security.check_pxo(str(params.get("path", "")))
+		if not pxo_error.is_empty():
+			return {"success": false, "error": pxo_error}
 	if tool_name == "save_project" and str(params.get("path", "")).is_empty():
 		return {"success": false, "error": "save_project requires an explicit 'path' inside the allowed roots"}
 

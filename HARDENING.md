@@ -16,6 +16,7 @@ browser could reach code execution on the machine. This fork closes that path an
 | Request size / slow clients | body length unchecked, 120 s per connection on a single accept loop | headers ≤ 16 KB within 2 s, body ≤ 4 MB within 30 s (413/431); GET never waits for a body (a fake `Content-Length` on `/health` used to hold the single accept loop). Several stalled sockets still serialise for ~2 s each (availability only) |
 | MCP client | `fetch` to `PIX_MCP_BRIDGE_URL` (any host) | `node:http`, loopback URLs only (startup error otherwise), token attached |
 | Shipped binaries/scripts | prebuilt `PixMcpBridge.pck`, 6 MB `Pixelorama.pck`, `start_pixelorama.sh` (`kill -9`, `rm -rf` on author paths), ad-hoc test scripts | removed; `pack.gd` builds `PixMcpBridge.pck` from source only and copies nothing |
+| Project files | `open_project` passed any file to Pixelorama's loader | pre-scan of `.pxo` (see Not covered) |
 | Pixelorama 1.2.4 compatibility | cels assumed canvas-sized; 1.2.4 cels are sparse (used rect + `offset`, empty = 1x1) so draws/reads silently did nothing | `_norm(cel)` expands a cel to canvas size at offset 0 before use (content unchanged, offset/size are in undo data) |
 
 ## Build and install (macOS)
@@ -39,4 +40,4 @@ Verified 2026-11-06 on Pixelorama v1.2.4 (API 10), Godot 4.7.2 build tools: 35/3
 - Other local processes running as the same user can read the token file (same trust boundary as the user).
 - Drawing commands are not individually sandboxed; they act on open canvases (undoable in Pixelorama).
 - Read commands also expand sparse cels to canvas size in place (content unchanged, not recorded as an undo step).
-- `open_project` hands `.pxo` files to Pixelorama's own loader; whether that loader can be made to load scripts was not audited.
+- `open_project` pre-scans the file before Pixelorama's loader sees it: `.pxo` extension and zip format only (legacy v0 loader refused), no `scene/` entries (Pixelorama 1.2.4 `load()`s embedded 3D-layer scenes behind a substring-only script guard), cel `image_size` / tileset `tile_size` must be plain integer pairs (they go through `str_to_var`), and no `Object(` literal anywhere in `data.json`. Whether the upstream loader is actually exploitable was not tested; the risky paths are refused instead (`tests/pxo_test.py`, 8 checks). Opening hostile `.pxo` files through Pixelorama's own GUI is outside this fork.
